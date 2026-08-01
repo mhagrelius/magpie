@@ -7,16 +7,85 @@ libadwaita. Paste a link, choose a quality, and the file lands in your Downloads
 folder with a record of where it came from. Playlists arrive as a list to pick
 from. The queue survives closing the window.
 
-Downloading is done by [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
-transcribing by [whisper.cpp](https://github.com/ggml-org/whisper.cpp). Magpie
-bundles neither and downloads no executables of its own — both are installed
-through your package manager and stay current with the rest of your system.
+Downloading is done by [yt-dlp](https://github.com/yt-dlp/yt-dlp), transcribing
+by [whisper.cpp](https://github.com/ggml-org/whisper.cpp), and telling voices
+apart by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). yt-dlp is never
+bundled and never self-updated — it is installed through your package manager and
+stays current with the rest of your system, which matters because it is the one
+of the three that rots when sites change. The two optional inference tools are
+pinned and installed by an explicit flag to `./install.sh`, because Ubuntu
+packages neither and local inference does not go stale.
+
+## Features
+
+**Downloading**
+
+- Paste a link and go — the Add dialog fills in the title, thumbnail, duration
+  and formats as soon as yt-dlp answers. `Ctrl+N` focuses the box; the paste
+  button does it in one step.
+- Quality presets from *Best available* down to a 480p ceiling, audio-only in the
+  original format or converted to MP3/M4A, or any specific format id yt-dlp
+  listed.
+- Playlists and channels arrive as a checklist, all ticked, saved into a
+  subfolder in playlist order. A `watch?v=…&list=…` link is treated as the one
+  video you clicked.
+- A queue that survives closing the window, with a configurable number of
+  downloads running at once.
+- Pause and resume (`SIGSTOP`/`SIGCONT`), cancel, retry, and resume from a
+  part-finished file rather than starting again.
+- Cookies from your browser for sites that want a signed-in account — read from
+  the browser's own profile each time, never stored by Magpie.
+- Optional rate limit, and a download folder you choose once.
+
+**Transcripts**
+
+- Transcribe a finished download to plain text, SRT or WebVTT, written beside the
+  media file. Per download, or on by default.
+- Four whisper models from Tiny to Medium, downloaded on demand with the size
+  shown first and a button to delete one afterwards.
+- Automatic language detection, or pick from sixteen.
+- Audio is converted to 16 kHz mono in the cache directory, never next to your
+  file, and the scratch copy is cleaned up.
+
+**Identifying speakers**
+
+- Works out **how many people are talking** by clustering voice embeddings —
+  you are not asked to know in advance, though you can say so if you do.
+- Every line attributed: `Speaker 1:` in text and SRT, a real `<v Speaker 1>`
+  voice span in WebVTT, with subtitle timings untouched.
+- Names picked up from what people call each other — "I'm Alice", "thanks,
+  Priya", "over to you, Marcus" — treated as a guess that has to be earned, with
+  an honest number as the fallback.
+- The transcript is never lost to a failure here: if the tool, the models or the
+  run is missing, you keep the plain transcript and get told why it has no names.
+
+**Being honest about the tools**
+
+- **Preferences → Tools** lists every program Magpie runs with its path, version
+  and age, and offers Install, Update or Copy depending on what would actually
+  work.
+- A stale yt-dlp is named as the first thing to suspect, because months behind is
+  frequently the difference between a download working and failing for reasons
+  the error blames on something else.
+- Failures state the cause and the fix rather than printing stderr, and Retry
+  only appears where trying again could help.
+- Nothing but yt-dlp is required to start. A missing tool is a banner or a greyed
+  switch with an explanation, never a blank screen.
+
+**The application itself**
+
+- GTK 4 and libadwaita throughout, light and dark, and a layout that adapts down
+  to a phone-width window.
+- A record of every download in `library.json`, written atomically and recovered
+  rather than lost if it is ever truncated.
+- Undo for a removed download, and Clear Finished for the rest.
 
 ## Install
 
 ```bash
 ./install.sh                    # into ~/.local
 ./install.sh --with-whisper     # also build whisper.cpp, for transcripts
+./install.sh --with-diarizer    # also fetch sherpa-onnx, to identify speakers
 PREFIX=/usr/local sudo ./install.sh
 ```
 
@@ -24,8 +93,8 @@ or build a package:
 
 ```bash
 packaging/build-deb.sh --install
-packaging/build-deb.sh --with-whisper --install
-packaging/build-flatpak.sh      # includes whisper.cpp; see the caveats below
+packaging/build-deb.sh --with-whisper --with-diarizer --install
+packaging/build-flatpak.sh      # includes both; see the caveats below
 ```
 
 ### Requirements
@@ -37,6 +106,7 @@ packaging/build-flatpak.sh      # includes whisper.cpp; see the caveats below
 | **A JavaScript engine** | Deno recommended. YouTube needs one to reveal every format |
 | FFmpeg | For merging high quality video and converting audio. `sudo apt install ffmpeg` |
 | whisper.cpp | Optional, only for transcripts. `./install.sh --with-whisper` builds it |
+| sherpa-onnx | Optional, only to mark who is speaking. `./install.sh --with-diarizer` fetches it |
 | `libsoup-3.0-dev` | To build |
 
 **Two things about yt-dlp that are easy to get wrong**, and that Magpie's Tools
@@ -162,6 +232,39 @@ Anything that is not already WAV, MP3, FLAC or OGG — which is most downloads �
 converted to 16 kHz mono first, in the cache directory rather than next to your
 file, and the scratch copy is deleted afterwards.
 
+### Who is speaking
+
+Turn on **Identify speakers** as well and a transcript of a conversation comes
+back attributed, instead of as a wall of text in which nobody can find who said
+what:
+
+```
+Speaker 1: A pencil with black lead writes best, the lamp shone with a
+steady green flame.
+
+Speaker 2: Clothes and lodging are free to new men, the glow deepened in
+the eyes of the sweet girl.
+```
+
+Magpie works out **how many people are talking** rather than asking you: voices
+are turned into vectors and clustered, and the number of clusters is the number
+of speakers. If you already know, say so in Preferences — a fixed count is more
+reliable than a threshold deciding.
+
+Where people say each other's names, those are used instead of numbers. "I'm
+Alice" names the speaker, "thanks, Priya" names whoever just finished, "over to
+you, Marcus" names whoever starts next. This is a guess and is treated as one: a
+name has to be said more than once to beat a rival, no two speakers can end up
+sharing one, and anything unproven stays "Speaker 2".
+
+Subtitles get the same treatment with their timings untouched — SRT as a
+`Speaker 1:` prefix, WebVTT as a real `<v Speaker 1>` voice span.
+
+This needs sherpa-onnx and two models of its own (about 34 MB, downloaded from
+Preferences → Transcripts). `./install.sh --with-diarizer` fetches the binary,
+pinned to v1.13.4. If any of it is missing or the run fails, you still get the
+plain transcript and a note saying why it has no names on it.
+
 ### Where things are
 
 | | |
@@ -169,7 +272,7 @@ file, and the scratch copy is deleted afterwards.
 | Downloads | Your Downloads folder, or wherever you point it |
 | `~/.config/magpie/config.json` | Preferences |
 | `~/.local/share/magpie/library.json` | The queue and the history |
-| `~/.local/share/magpie/models/` | Whisper models |
+| `~/.local/share/magpie/models/` | Speech and speaker models |
 | `~/.cache/magpie/` | Thumbnails and scratch files |
 
 ## How it works
