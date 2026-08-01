@@ -57,11 +57,12 @@ impl Tool {
             Tool::Ffmpeg => &["ffmpeg"],
             Tool::Ffprobe => &["ffprobe"],
             Tool::Whisper => &["whisper-cli", "whisper-cpp"],
-            // Deno first because it is the only one yt-dlp enables by default;
-            // the others work but have to be pointed at explicitly. Order is
-            // preference, so a machine with all three gets the one needing no
-            // extra argument.
-            Tool::JsRuntime => &["deno", "node", "bun"],
+            // Order is yt-dlp's own, from its EJS setup guide: deno is
+            // recommended and the only one enabled by default, node and quickjs
+            // work when named, and bun is deprecated — versions after 1.3.14 are
+            // unsupported and support may be dropped — so it is the last resort
+            // rather than a peer.
+            Tool::JsRuntime => &["deno", "node", "quickjs", "bun"],
         }
     }
 
@@ -82,10 +83,7 @@ impl Tool {
             Tool::Ffmpeg => "Needed to merge high quality video and to convert audio",
             Tool::Ffprobe => "Comes with FFmpeg. Used to measure audio before transcribing",
             Tool::Whisper => "Optional. Needed only for transcripts",
-            Tool::JsRuntime => {
-                "YouTube needs one to reach every format. Without it, the higher \
-                 qualities may be missing"
-            }
+            Tool::JsRuntime => "YouTube needs one to reveal every format",
         }
     }
 
@@ -103,8 +101,14 @@ impl Tool {
             // `uv tool install`, never `uvx`: uvx runs a tool without leaving
             // anything on PATH, so someone who followed a `uvx yt-dlp` hint would
             // come straight back here and still be told it is not installed.
-            Tool::YtDlp if installers.uv => "uv tool install yt-dlp".into(),
-            Tool::YtDlp if installers.pipx => "pipx install yt-dlp".into(),
+            // `[default]` is not decoration. The PyPI package alone omits
+            // `yt-dlp-ejs`, the challenge-solver scripts YouTube extraction needs,
+            // and yt-dlp's own guide says to install the default dependency group
+            // to get them. A plain `uv tool install yt-dlp` produces a yt-dlp that
+            // warns about missing formats no matter which JS engine is present.
+            Tool::YtDlp if installers.uv => "uv tool install \"yt-dlp[default]\"".into(),
+            Tool::YtDlp if installers.pipx => "pipx install \"yt-dlp[default]\"".into(),
+            // Debian's package ships its own dependencies, so no extra here.
             Tool::YtDlp => "sudo apt install yt-dlp".into(),
             Tool::Ffmpeg | Tool::Ffprobe => "sudo apt install ffmpeg".into(),
             // No package on Ubuntu, so Magpie ships a script that builds one.
@@ -112,10 +116,16 @@ impl Tool {
             // couple of minutes, and a GUI button that silently starts a C++
             // build is a button whose failure nobody can read.
             Tool::Whisper => "./install.sh --with-whisper".into(),
-            // Not in Ubuntu's archive, and not something to fetch with a shell
-            // pipeline on the user's behalf. Node is the one most machines
-            // already have, so it is named first.
-            Tool::JsRuntime => "sudo apt install nodejs — or deno.land".into(),
+            // Deno is what yt-dlp recommends and the only runtime it enables
+            // without being told to. Ubuntu has no deno package, so a system
+            // install means snap where there is one; otherwise deno's own
+            // installer, which lands in ~/.deno/bin — a directory `candidates`
+            // searches, so it is found without touching PATH.
+            //
+            // Node is the fallback because Ubuntu does package it, and a system
+            // package that updates with everything else beats a private copy.
+            Tool::JsRuntime if installers.snap => "sudo snap install deno".into(),
+            Tool::JsRuntime => "sudo apt install nodejs".into(),
         }
     }
 
@@ -123,8 +133,15 @@ impl Tool {
     /// old rather than absent.
     pub fn upgrade_command(self, installers: Installers) -> Option<String> {
         match self {
-            Tool::YtDlp if installers.uv => Some("uv tool upgrade yt-dlp".into()),
-            Tool::YtDlp if installers.pipx => Some("pipx upgrade yt-dlp".into()),
+            // Reinstall rather than upgrade, so that a yt-dlp first installed
+            // without `[default]` gains the EJS scripts instead of upgrading
+            // around them forever.
+            Tool::YtDlp if installers.uv => {
+                Some("uv tool install --force \"yt-dlp[default]\"".into())
+            }
+            Tool::YtDlp if installers.pipx => {
+                Some("pipx install --force \"yt-dlp[default]\"".into())
+            }
             // Nothing useful to offer: apt's copy is as new as the archive has,
             // and telling someone to `apt upgrade` a package that is already at
             // its latest version is advice that cannot work.
@@ -138,6 +155,11 @@ impl Tool {
         let command = self.install_command(installers);
         match self {
             Tool::Whisper => format!("Build it from Magpie's source tree — {command}"),
+            // Deno named only when it is not already the command, so the line
+            // does not recommend the thing it just told you to install.
+            Tool::JsRuntime if !command.contains("deno") => {
+                format!("{command} — or Deno, which yt-dlp recommends")
+            }
             // Said out loud, because someone who installs the distribution's
             // package and then hits a failure deserves to have been warned.
             Tool::YtDlp if !installers.uv && !installers.pipx => format!(
@@ -175,6 +197,10 @@ impl Tool {
 pub struct Installers {
     pub uv: bool,
     pub pipx: bool,
+    /// Whether snapd is present. Only used to decide whether recommending
+    /// `snap install deno` would work; Magpie never runs it, because it needs a
+    /// password.
+    pub snap: bool,
 }
 
 impl Installers {
@@ -559,16 +585,61 @@ mod tests {
     }
 
     #[test]
+    fn no_user_facing_string_has_a_run_of_spaces_in_it() {
+        // A `\` line continuation inside a string literal strips the following
+        // indentation — until `cargo fmt` decides to join the lines, at which
+        // point the spaces become part of the text. That happened once here and
+        // was invisible in the source; it only showed up in a rendered screenshot
+        // as a gap mid-sentence. Cheaper to assert than to re-notice.
+        let mut checked = 0;
+        for installers in [
+            Installers::default(),
+            Installers {
+                uv: true,
+                ..Installers::default()
+            },
+            Installers {
+                snap: true,
+                ..Installers::default()
+            },
+        ] {
+            for tool in [
+                Tool::YtDlp,
+                Tool::JsRuntime,
+                Tool::Ffmpeg,
+                Tool::Ffprobe,
+                Tool::Whisper,
+            ] {
+                let mut strings = vec![
+                    tool.purpose().to_string(),
+                    tool.label().to_string(),
+                    tool.install_command(installers),
+                    tool.install_hint(installers),
+                ];
+                strings.extend(tool.upgrade_command(installers));
+                for text in strings {
+                    assert!(!text.contains("  "), "{tool:?}: {text:?}");
+                    assert_eq!(text.trim(), text, "{tool:?}: {text:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 40, "the loop covered {checked} strings");
+    }
+
+    #[test]
     fn every_tool_says_how_to_install_it_whatever_the_user_has() {
         for installers in [
             Installers::default(),
             Installers {
                 uv: true,
                 pipx: false,
+                ..Installers::default()
             },
             Installers {
                 uv: false,
                 pipx: true,
+                ..Installers::default()
             },
         ] {
             for tool in [Tool::YtDlp, Tool::Ffmpeg, Tool::Ffprobe, Tool::Whisper] {
@@ -586,22 +657,90 @@ mod tests {
         let uv = Installers {
             uv: true,
             pipx: false,
+            ..Installers::default()
         };
-        assert_eq!(Tool::YtDlp.install_command(uv), "uv tool install yt-dlp");
+        assert_eq!(
+            Tool::YtDlp.install_command(uv),
+            "uv tool install \"yt-dlp[default]\""
+        );
         assert_eq!(
             Tool::YtDlp.upgrade_command(uv).as_deref(),
-            Some("uv tool upgrade yt-dlp")
+            Some("uv tool install --force \"yt-dlp[default]\"")
         );
 
         let pipx = Installers {
             uv: false,
             pipx: true,
+            ..Installers::default()
         };
-        assert_eq!(Tool::YtDlp.install_command(pipx), "pipx install yt-dlp");
+        assert_eq!(
+            Tool::YtDlp.install_command(pipx),
+            "pipx install \"yt-dlp[default]\""
+        );
         assert_eq!(
             Tool::YtDlp.upgrade_command(pipx).as_deref(),
-            Some("pipx upgrade yt-dlp")
+            Some("pipx install --force \"yt-dlp[default]\"")
         );
+    }
+
+    #[test]
+    fn a_python_install_of_yt_dlp_always_asks_for_the_solver_scripts() {
+        // The PyPI package alone omits `yt-dlp-ejs`, the challenge-solver scripts
+        // YouTube extraction needs. Without the `default` group yt-dlp warns about
+        // missing formats no matter which JavaScript engine is installed — so a
+        // command Magpie offers that lacks it would be advice that cannot work.
+        for installers in [
+            Installers {
+                uv: true,
+                ..Installers::default()
+            },
+            Installers {
+                pipx: true,
+                ..Installers::default()
+            },
+        ] {
+            for command in [
+                Some(Tool::YtDlp.install_command(installers)),
+                Tool::YtDlp.upgrade_command(installers),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(
+                    command.contains("yt-dlp[default]"),
+                    "{command:?} would leave the EJS scripts missing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_javascript_engine_is_recommended_the_way_yt_dlp_recommends_it() {
+        // Deno first: it is the one yt-dlp calls recommended and the only one it
+        // enables without being told to. A system package where one exists,
+        // because it updates with everything else.
+        let snap = Installers {
+            snap: true,
+            ..Installers::default()
+        };
+        assert_eq!(
+            Tool::JsRuntime.install_command(snap),
+            "sudo snap install deno"
+        );
+        // No deno package in Ubuntu's archive, so node — which Ubuntu does
+        // package — is the fallback rather than a curl pipeline.
+        assert_eq!(
+            Tool::JsRuntime.install_command(Installers::default()),
+            "sudo apt install nodejs"
+        );
+        // Neither is Magpie's to run: both need a password.
+        assert!(!snap.can_run(&Tool::JsRuntime.install_command(snap)));
+
+        // bun is deprecated by yt-dlp, so it is the last thing looked for.
+        let order = Tool::JsRuntime.commands();
+        assert_eq!(order.first(), Some(&"deno"));
+        assert_eq!(order.last(), Some(&"bun"));
+        assert!(order.contains(&"quickjs"));
     }
 
     #[test]
@@ -614,6 +753,7 @@ mod tests {
             Installers {
                 uv: true,
                 pipx: true,
+                ..Installers::default()
             },
         ] {
             let command = Tool::YtDlp.install_command(installers);
@@ -629,7 +769,8 @@ mod tests {
         let nothing = Installers::default();
         assert_eq!(
             Tool::YtDlp.install_command(nothing),
-            "sudo apt install yt-dlp"
+            "sudo apt install yt-dlp",
+            "no [default] for the distribution package, which ships its own deps"
         );
         assert!(Tool::YtDlp.install_hint(nothing).contains("too old"));
         // And there is no upgrade command, because there is nothing to upgrade
@@ -642,6 +783,7 @@ mod tests {
         let uv = Installers {
             uv: true,
             pipx: false,
+            ..Installers::default()
         };
         assert!(uv.can_run("uv tool install yt-dlp"));
         // Named but not installed, so there is nothing to run.
@@ -674,14 +816,17 @@ mod tests {
             Installers {
                 uv: true,
                 pipx: false,
+                ..Installers::default()
             },
             Installers {
                 uv: false,
                 pipx: true,
+                ..Installers::default()
             },
             Installers {
                 uv: true,
                 pipx: true,
+                ..Installers::default()
             },
         ] {
             for tool in [Tool::YtDlp, Tool::Ffmpeg, Tool::Ffprobe, Tool::Whisper] {

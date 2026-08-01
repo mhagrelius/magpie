@@ -33,16 +33,37 @@ packaging/build-flatpak.sh      # includes whisper.cpp; see the caveats below
 | | |
 |---|---|
 | GTK 4.16 or newer, libadwaita 1.9 or newer | Ubuntu 25.10 / GNOME 50 and later |
-| **yt-dlp** | Required. `uv tool install yt-dlp`, or `sudo apt install yt-dlp` |
+| **yt-dlp** | Required. `uv tool install "yt-dlp[default]"`, or `sudo apt install yt-dlp` |
+| **A JavaScript engine** | Deno recommended. YouTube needs one to reveal every format |
 | FFmpeg | For merging high quality video and converting audio. `sudo apt install ffmpeg` |
 | whisper.cpp | Optional, only for transcripts. `./install.sh --with-whisper` builds it |
 | `libsoup-3.0-dev` | To build |
 
-**On yt-dlp's version.** The copy in a stable Ubuntu or Debian release is often
-months behind, and months behind is frequently the difference between a download
-working and failing with a message that blames something else. `uv tool install
-yt-dlp` gets a current one, and Magpie prefers a `yt-dlp` in `~/.local/bin` over
-one in `/usr/bin` for that reason.
+**Two things about yt-dlp that are easy to get wrong**, and that Magpie's Tools
+page will tell you about:
+
+*Its version.* The copy in a stable Ubuntu or Debian release is often months
+behind, and months behind is frequently the difference between a download working
+and failing with a message that blames something else. `uv tool install
+"yt-dlp[default]"` gets a current one, and Magpie prefers a `yt-dlp` in
+`~/.local/bin` over one in `/usr/bin` for that reason.
+
+*The `[default]` group, and a JavaScript engine.* YouTube now presents JavaScript
+challenges, and yt-dlp solves them with an external engine plus a set of solver
+scripts. The scripts ship in the `yt-dlp-ejs` package, which the bare PyPI install
+leaves out — hence `"yt-dlp[default]"`. The engine you install yourself:
+
+```bash
+sudo snap install deno          # if you have snapd; Deno is what yt-dlp recommends
+sudo apt install nodejs         # Ubuntu packages this one; needs 22.0.0 or newer
+```
+
+Deno's own installer puts it in `~/.deno/bin`, which Magpie searches directly —
+so it is found even though that directory is only on your `PATH` inside a shell,
+and a desktop launcher gives an app no shell. Without an engine yt-dlp still
+works but warns that some formats may be missing; Magpie passes
+`--js-runtimes <engine>:<absolute path>` for whichever it finds. Note `bun` is
+supported but deprecated by yt-dlp, so it is the last one Magpie looks for.
 
 You do not have to remember any of that. **Preferences → Tools** lists every
 program Magpie uses with its path, version and age, and offers a button:

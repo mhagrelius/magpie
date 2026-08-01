@@ -383,7 +383,10 @@ fn preferences_missing_tools() {
     assert!(update.get_visible());
     assert_eq!(
         update.tooltip_text().as_deref(),
-        Some("uv tool upgrade yt-dlp"),
+        // A forced reinstall with the `default` group, not a plain upgrade: a
+        // yt-dlp first installed without it would otherwise never gain the EJS
+        // solver scripts YouTube extraction needs.
+        Some("uv tool install --force \"yt-dlp[default]\""),
         "a button that changes the environment says exactly what it will run"
     );
 
@@ -444,7 +447,7 @@ fn report() -> ToolReport {
         // than printing a command to retype.
         installers: Installers {
             uv: true,
-            pipx: false,
+            ..Installers::default()
         },
         uv_path: Some(PathBuf::from("/home/matty/.local/bin/uv")),
         pipx_path: None,

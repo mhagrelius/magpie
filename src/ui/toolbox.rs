@@ -130,12 +130,16 @@ pub fn survey<F: Fn(Report) + 'static>(ytdlp_override: Option<PathBuf>, on_ready
     };
     let uv_path = installer("uv");
     let pipx_path = installer("pipx");
+    // Only checked so the advice can say `snap install deno` where that would
+    // work. Magpie never runs it — it needs a password.
+    let has_snap = installer("snap").is_some();
 
     glib::spawn_future_local(async move {
         let mut report = Report {
             installers: Installers {
                 uv: uv_path.is_some(),
                 pipx: pipx_path.is_some(),
+                snap: has_snap,
             },
             uv_path,
             pipx_path,

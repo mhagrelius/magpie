@@ -398,6 +398,29 @@ not to this document.
   the Tools page and in the guidance for the two failures it could cause, and not
   as a banner — a persistent warning about a maybe teaches people to ignore
   banners.
+
+  Engine preference is yt-dlp's own, from its EJS setup guide: `deno` first
+  (recommended, and the only one enabled without being named), then `node`, then
+  `quickjs`, with `bun` last because yt-dlp has deprecated it. The advice prefers a
+  system package — `snap install deno` where snapd exists, `apt install nodejs`
+  otherwise, since Ubuntu packages node and not deno — because a system package
+  updates with everything else. Neither is a command Magpie runs: both need a
+  password.
+
+- **`yt-dlp[default]`, not `yt-dlp`.** The other half of the same problem, and the
+  less obvious one. yt-dlp solves YouTube's JavaScript challenges with an engine
+  *and* a set of solver scripts, and those scripts live in a companion package,
+  `yt-dlp-ejs`. The official standalone binaries bundle it; the PyPI package does
+  not unless you ask for the `default` dependency group. So a plain
+  `uv tool install yt-dlp` produces a yt-dlp that warns about missing formats
+  however many engines are installed — which is exactly what the first install on
+  the author's own machine did.
+
+  Every command Magpie offers for a Python install therefore names
+  `"yt-dlp[default]"`, and the upgrade command is a forced reinstall rather than an
+  upgrade, so a yt-dlp first installed without the group gains the scripts instead
+  of upgrading around them forever. A unit test asserts no offered command can lack
+  it.
 - **No first-run setup wizard.** There is nothing to set up. A missing tool is
   an `AdwBanner`, not a gate — the library and preferences still work without
   `yt-dlp`, and gating the whole window on a download is how the old application

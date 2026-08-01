@@ -65,20 +65,42 @@ esac
 # now instead of at the moment a download fails.
 #
 # The yt-dlp advice names whichever installer is already here, matching what the
-# Tools page in Preferences will say. `uv tool install`, never `uvx`: uvx runs a
-# tool without leaving anything on PATH, so following it would not help.
+# Tools page in Preferences will say.
+#
+# Two things the obvious command gets wrong. `uvx` runs a tool without leaving
+# anything on PATH, so it must be `uv tool install`. And the PyPI package on its
+# own omits `yt-dlp-ejs`, the challenge-solver scripts YouTube needs, so it must
+# be the `[default]` group — without it yt-dlp warns about missing formats however
+# many JavaScript engines are installed.
 if command -v uv >/dev/null; then
-  ytdlp_hint="uv tool install yt-dlp"
+  ytdlp_hint='uv tool install "yt-dlp[default]"'
 elif command -v pipx >/dev/null; then
-  ytdlp_hint="pipx install yt-dlp"
+  ytdlp_hint='pipx install "yt-dlp[default]"'
 else
   ytdlp_hint="sudo apt install yt-dlp — though the packaged version is often too old for YouTube; installing uv gets a current one"
+fi
+
+# YouTube extraction needs a JavaScript engine. Deno is the one yt-dlp recommends
+# and the only one it enables without being told to; its own installer puts it in
+# ~/.deno/bin, which Magpie searches.
+if command -v snap >/dev/null; then
+  js_hint="sudo snap install deno"
+else
+  js_hint="sudo apt install nodejs — or Deno from https://docs.deno.com/runtime/getting_started/installation/"
 fi
 
 echo
 missing=()
 command -v yt-dlp >/dev/null || missing+=("yt-dlp — required. $ytdlp_hint")
 command -v ffmpeg >/dev/null || missing+=("ffmpeg — needed to merge high quality video and convert audio. sudo apt install ffmpeg")
+# Checked in yt-dlp's own order of preference, and including the directories the
+# engines' installers use, since those are reached by editing the shell profile
+# and Magpie is not always launched from a shell.
+if ! command -v deno >/dev/null && ! command -v node >/dev/null \
+  && ! command -v quickjs >/dev/null && ! command -v bun >/dev/null \
+  && [[ ! -x "$HOME/.deno/bin/deno" ]] && [[ ! -x "$HOME/.bun/bin/bun" ]]; then
+  missing+=("a JavaScript engine — YouTube needs one to reveal every format. $js_hint")
+fi
 if [[ -n "$WITH_WHISPER" ]]; then
   echo
   say "Building whisper.cpp for transcripts"

@@ -353,7 +353,7 @@ fn partial_toolbox() -> ToolReport {
         // than printing a command to retype.
         installers: Installers {
             uv: true,
-            pipx: false,
+            ..Installers::default()
         },
         uv_path: Some(PathBuf::from("/home/matty/.local/bin/uv")),
         pipx_path: None,
