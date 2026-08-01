@@ -1,7 +1,0 @@
-dist/
-dist-electron/
-dist-types/
-release/
-node_modules/
-*.md
-package-lock.json

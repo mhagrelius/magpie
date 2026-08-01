@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=us.hagreli.Magpie
+Exec=/app/bin/magpie --gapplication-service

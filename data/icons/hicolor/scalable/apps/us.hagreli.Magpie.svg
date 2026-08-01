@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#99c1f1"/>
+      <stop offset="1" stop-color="#3584e4"/>
+    </linearGradient>
+    <linearGradient id="feather" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#3d3846"/>
+      <stop offset="1" stop-color="#241f31"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App icons are not themed, so the colours here are literal. They are taken
+       from the GNOME palette so the icon sits beside the stock ones: Blue 1-4
+       for the ground, Dark 3-4 for the bird. -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#sky)"/>
+
+  <!-- The magpie: head, body and the long tail it is named for, facing left. -->
+  <g>
+    <!-- Tail, tapering down and to the right. -->
+    <path d="M74 68 L104 100 L96 108 L66 80 Z" fill="url(#feather)"/>
+    <!-- Iridescent stripe along the tail, which is the bird's tell. -->
+    <path d="M79 73 L98 92 L94 96 L75 77 Z" fill="url(#sheen)" opacity="0.85"/>
+
+    <!-- Body. -->
+    <path d="M52 36 C68 36 78 50 78 66 C78 78 70 86 58 86 C42 86 32 72 32 56
+             C32 44 40 36 52 36 Z" fill="url(#feather)"/>
+    <!-- The white flank, the other half of a magpie's plumage. -->
+    <path d="M46 52 C56 52 64 60 64 70 C64 77 60 81 54 81
+             C45 81 39 73 39 63 C39 56 42 52 46 52 Z" fill="#ffffff"/>
+
+    <!-- Head, and the beak reaching for something shiny. -->
+    <circle cx="50" cy="38" r="13" fill="url(#feather)"/>
+    <path d="M38 36 L22 40 L38 45 Z" fill="#f5c211"/>
+    <circle cx="54" cy="35" r="2.6" fill="#ffffff"/>
+  </g>
+
+  <!-- The shiny thing, which is what the bird is for. -->
+  <circle cx="30" cy="86" r="7" fill="#f6d32d"/>
+  <circle cx="28" cy="84" r="2.2" fill="#ffffff" opacity="0.9"/>
+</svg>

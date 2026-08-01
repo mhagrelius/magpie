@@ -1,0 +1,71 @@
+/* Colours are Adwaita's own custom properties, never literals: the palette
+ * follows the user's light or dark preference and their accent colour without
+ * this file knowing either. */
+
+/* The link bar reads as one control, so the entry and its buttons sit in a
+ * single card rather than floating separately. */
+.link-bar {
+  background-color: var(--card-bg-color);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px var(--card-shade-color);
+  padding: 6px;
+}
+
+.link-bar entry {
+  background: none;
+  box-shadow: none;
+  min-height: 34px;
+}
+
+/* A poster image, wherever one appears: the row, the Add dialog. Clipped with a
+ * radius that matches the boxed list it sits in. */
+.poster {
+  border-radius: 6px;
+  background-color: var(--card-shade-color);
+}
+
+/* Progress under a row is information, not decoration; at full height it
+ * dominates the title it belongs to. */
+.job-progress {
+  min-height: 3px;
+}
+
+.job-progress trough,
+.job-progress progress {
+  min-height: 3px;
+  border-radius: 3px;
+}
+
+/* The status line under a title. `.caption` sizes it, `.dimmed` recedes it, and
+ * `.numeric` stops the row's width jittering as the percentage changes: tabular
+ * figures are all one width. */
+.job-status {
+  font-feature-settings: "tnum";
+}
+
+/* A failed row states its cause in the error colour rather than shouting with a
+ * red background. */
+.job-status.error {
+  color: var(--error-color);
+}
+
+.job-status.warning {
+  color: var(--warning-color);
+}
+
+/* The duration badge over a poster in the Add dialog, as YouTube's own overlay
+ * reads. Fixed dark background because it sits on an image, not on the theme. */
+.duration-badge {
+  background-color: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin: 4px;
+}
+
+/* The playlist picker can be long; the scrolled area needs a visible edge to
+ * read as one region inside the dialog. */
+.entry-list {
+  background-color: var(--card-bg-color);
+  border-radius: 12px;
+}

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Magpie
+GenericName=Video Downloader
+Comment=Bring videos home from the web
+# One main category only. AudioVideo and Network are both main categories, and
+# listing two makes the app appear twice in the menu; Video is an additional
+# category, which is what qualifies the main one.
+Categories=AudioVideo;Video;GNOME;GTK;
+Keywords=video;download;downloader;youtube;yt-dlp;playlist;audio;mp3;transcript;subtitles;
+Exec=magpie
+Icon=us.hagreli.Magpie
+Terminal=false
+StartupNotify=true
+# Must match the application ID so the shell associates windows with this entry.
+StartupWMClass=us.hagreli.Magpie
+DBusActivatable=true

@@ -1,0 +1,31 @@
+Package: magpie
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Matthew Hagrelius <matthew@hagreli.us>
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@, yt-dlp
+Recommends: ffmpeg
+Section: video
+Priority: optional
+Homepage: https://github.com/mhagrelius/magpie
+Description: Bring videos home from the web
+ Magpie downloads video and audio from the web for the GNOME desktop. Paste a
+ link, choose a quality, and the file lands in your Downloads folder with a
+ record of where it came from.
+ .
+ Quality presets reach past 360p by merging the separate video and audio streams
+ that modern sites serve, and audio-only downloads can be kept in their original
+ format or converted to MP3 or M4A. Playlists and channels arrive as a list of
+ items to pick from, in a folder of their own.
+ .
+ The queue survives closing the window and resumes a part-finished download
+ rather than starting it again. Downloads can be paused, resumed and cancelled,
+ and a failure names a cause and a remedy instead of relaying a stack trace.
+ .
+ Downloading is done by yt-dlp, which is a dependency rather than something
+ Magpie bundles or downloads for itself. Note that the yt-dlp in a stable Debian
+ or Ubuntu release is often too old to work against YouTube; if downloads fail,
+ the Tools page in Preferences shows the installed version and its age.
+ .
+ Transcripts are optional and need whisper.cpp, for which Ubuntu has no package.
+ Build this .deb with --with-whisper to compile and include one.

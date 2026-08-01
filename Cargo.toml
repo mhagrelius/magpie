@@ -1,0 +1,54 @@
+[package]
+name = "magpie"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A video downloader for the GNOME desktop"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "magpie"
+path = "src/main.rs"
+
+[lib]
+name = "magpie"
+path = "src/lib.rs"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+# Direct dependency purely to raise the API level above what gtk4 pulls in:
+# Subprocess::send_signal for pause/resume wants the v2_80 shape, and the
+# thumbnail cache reads with the v2_80 GFile async signatures.
+gio = { version = "0.22", features = ["v2_80"] }
+serde = { version = "1", features = ["derive"] }
+# yt-dlp speaks JSON on stdout for `--dump-json`, and the library file is JSON.
+# The metadata is deeply optional and irregular, so most of it is read out of a
+# `serde_json::Value` by hand rather than derived into a struct that would
+# reject a field yt-dlp renamed.
+serde_json = "1"
+# Timestamps on library entries, and the "your yt-dlp is N days old" check that
+# is the single most common cause of a download failing.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+# Signal numbers, and `prctl(PR_SET_PDEATHSIG)` so a running yt-dlp dies with
+# Magpie instead of carrying on writing into the user's folder with nothing
+# watching it. Already in the tree — glib depends on it — so this is a direct
+# use of something that was going to be compiled anyway, not a new dependency.
+# There is no GLib equivalent: `g_unix_signal_add` is unbound in glib-rs 0.22,
+# and no signal handler could cover SIGKILL, which the kernel-level parent-death
+# signal does.
+libc = "0.2"
+# Two HTTP jobs: fetch a poster image, and fetch a whisper model. `gio::File`
+# over an https URI would do both, but only where gvfs' http backend is
+# installed and reachable — which it is not inside a Flatpak sandbox. libsoup is
+# GNOME's own client and is already in the runtime. Needs `libsoup-3.0-dev` to
+# build; nothing extra for Flatpak. Same call as Familiar makes.
+soup = { package = "soup3", version = "0.9" }
+
+[dev-dependencies]
+adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+tempfile = "3"

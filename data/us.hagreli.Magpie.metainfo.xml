@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>us.hagreli.Magpie</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Magpie</name>
+  <summary>Bring videos home from the web</summary>
+
+  <description>
+    <p>
+      Magpie downloads video and audio from the web. Paste a link, choose a
+      quality, and the file lands in your Downloads folder with a record of
+      where it came from.
+    </p>
+    <p>Magpie adds:</p>
+    <ul>
+      <li>Quality presets that reach past 360p, merging separate video and
+          audio streams the way modern sites serve them</li>
+      <li>Audio-only downloads, kept in their original format or converted to
+          MP3 or M4A</li>
+      <li>Playlists and channels, with a list of items to pick from and a
+          folder of their own</li>
+      <li>A queue that survives closing the window, and resumes a part-finished
+          download rather than starting it again</li>
+      <li>Pause, resume, cancel, and errors that name a cause and a remedy
+          instead of relaying a stack trace</li>
+      <li>Optional transcripts, written beside the file as plain text or
+          subtitles</li>
+    </ul>
+    <p>
+      Downloading is done by yt-dlp, which Magpie does not bundle: it is
+      installed through your package manager and stays current with the rest of
+      your system, because a pinned copy of a web scraper goes stale in weeks.
+      Transcribing is done by whisper.cpp, which Magpie does build and include,
+      because no distribution packages it and it has nothing to go stale against.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">us.hagreli.Magpie.desktop</launchable>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+
+  <keywords>
+    <keyword>video</keyword>
+    <keyword>download</keyword>
+    <keyword>playlist</keyword>
+    <keyword>transcript</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <recommends>
+    <!-- Not a hard requirement: the window, the list and the preferences all
+         work without it, and the Tools page says how to install it. -->
+    <id>org.freedesktop.ffmpeg</id>
+  </recommends>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-01">
+      <description>
+        <p>
+          First release. A rewrite of an Electron application of the same
+          purpose, in Rust with GTK 4 and libadwaita.
+        </p>
+      </description>
+    </release>
+  </releases>
+
+  <developer id="us.hagreli">
+    <name>Matthew Hagrelius</name>
+  </developer>
+
+  <url type="homepage">https://github.com/mhagrelius/magpie</url>
+  <url type="bugtracker">https://github.com/mhagrelius/magpie/issues</url>
+</component>

@@ -1,118 +1,32 @@
-# CLAUDE.md
+# magpie
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+A video downloader (crate/binary name is `magpie`, not the repo name). Shells out to yt-dlp.
 
-## Project Overview
+## Stack
 
-YouTube Downloader is an Electron + React desktop application for downloading YouTube videos. It uses yt-dlp (with Deno runtime) for downloading and Whisper.cpp for AI-powered transcription.
+GTK 4.22 + libadwaita 1.9 via gtk4-rs 0.11 / libadwaita-rs 0.9, Rust edition 2021 (MSRV 1.80). `gio` is a direct dependency purely to raise the API level to v2_80 — leave it.
+
+Crate is a lib + bin so integration tests and `examples/` can drive the real application rather than a copy of it.
 
 ## Commands
 
-### Development
-```bash
-npm run electron:dev    # Start app in dev mode with hot reload
-npm run dev             # Start Vite dev server only
-```
+- `./test.sh` — fmt check, clippy with `-D warnings`, then `cargo test --all-targets`. Add `--headless` to run under Xvfb + a private D-Bus session. This is the gate; run it, not bare `cargo test`.
+- `./install.sh` — release build, installs under `~/.local`. `./uninstall.sh` reverses it.
+- `packaging/build-flatpak.sh` and `packaging/build-deb.sh` — distribution artifacts.
+- `cargo run --example preview -- /tmp/preview [dark]` — paints the real widget tree
+  offscreen to PNGs. This is how a UI change gets looked at; GNOME will not give a
+  screenshot to a non-interactive caller.
 
-### Building
-```bash
-npm run build           # Full build (TypeScript + Vite + Electron)
-npm run build:test      # Build Electron part only (for E2E tests)
-npm run build:mac       # Build macOS DMG (arm64)
-npm run build:win       # Build Windows installer (x64)
-npm run build:linux     # Build Linux AppImage
-```
+Widget tests need a display; model tests do not and are the bulk of the suite. `test.sh` sets `GTK_A11Y=none` and `GSETTINGS_BACKEND=memory` so tests never touch real user state — keep that true for anything new.
 
-### Testing
-```bash
-npm run test            # Unit + integration tests
-npm run test:unit       # Unit tests only (watch mode)
-npm run test:e2e        # E2E tests (@smoke tagged only)
-npm run test:e2e:full   # All E2E tests including slow ones
-npm run test:all        # Complete test suite
-```
+## Layout
 
-Run a single test file:
-```bash
-npx vitest run tests/unit/stores/downloadStore.test.ts
-npx playwright test e2e/url-input.spec.ts
-```
+`src/model/` is pure logic with no GTK types. `src/ui/` is widgets and the application. Read `DESIGN.md` and `README.md` before proposing structural changes; both are current.
 
-### Code Quality
-```bash
-npm run check           # Full check: types + lint + format + tests
-npm run lint:fix        # Auto-fix ESLint issues
-npm run format          # Format with Prettier
-npm run type-check      # TypeScript type checking
-```
+The seam that makes the tests possible: **`model/` builds argument vectors and parses lines; `ui/` runs the process.** Nothing under `model/` spawns anything, so every flag combination and every shape of yt-dlp output is checkable with no display and no network. `ui/process.rs` is the only file that launches a child. Widgets emit intent signals; `ui/application.rs` is the only object that mutates the queue, writes a file, or spawns anything.
 
-## Architecture
+## Conventions
 
-### Process Model (Electron)
-
-```
-Renderer (React)          Preload (Bridge)           Main Process (Node.js)
-    │                         │                            │
- src/App.tsx ───────► electron/preload.ts ─────► electron/main.ts
-    │                         │                            │
-Zustand stores     window.electronAPI         IPC handlers + Services
-```
-
-- **Main Process** (`electron/main.ts`): App entry, IPC registration, services
-- **Preload** (`electron/preload.ts`): Context-isolated bridge exposing `window.electronAPI`
-- **Renderer** (`src/`): React app, cannot access Node.js APIs directly
-
-### Key Services (electron/services/)
-
-| Service | Purpose |
-|---------|---------|
-| `ytdlp.service.ts` | yt-dlp wrapper, video info fetching, download subprocess |
-| `binary-manager.service.ts` | Download/manage yt-dlp & Deno binaries |
-| `database.service.ts` | SQLite persistence via better-sqlite3 |
-| `settings.service.ts` | Settings CRUD operations |
-| `transcription.service.ts` | Whisper.cpp integration |
-
-### State Management
-
-- **Frontend**: Zustand stores (`src/stores/downloadStore.ts`, `settingsStore.ts`)
-- **Backend**: SQLite database for persistence
-- **Cross-process**: IPC events for real-time progress updates
-
-### IPC Pattern
-
-All main process operations go through IPC handlers in `electron/ipc/`. Handler registration:
-```typescript
-ipcMain.handle('channel:action', ipcHandler(async (event, args) => {
-  // Handler logic
-}, { channel: 'channel:action' }))
-```
-
-All IPC responses use ApiResult wrapper: `{ success, data?, error? }`
-
-### Shared Types
-
-`shared/types.ts` is the single source of truth for TypeScript interfaces (VideoInfo, DownloadProgress, etc.)
-
-## Testing
-
-- **Unit tests** (Vitest, jsdom): `tests/unit/` - components, utilities, stores
-- **Integration tests** (Vitest, Node): `tests/integration/` - services, cross-module
-- **E2E tests** (Playwright): `e2e/` - full app workflows
-
-E2E tests require a build first: `npm run build:test && npm run test:e2e`
-
-Mock `window.electronAPI` is set up in `tests/setup.ts` for unit tests.
-
-## Important Patterns
-
-- **Path Security**: All file paths validated via `isPathWithinAllowed()` in `electron/utils/ipc-handler.ts`
-- **Event Cleanup**: IPC event listeners in `useDownloadEvents` hook must unsubscribe on unmount
-- **Serialization**: IPC only transfers JSON-serializable data, no functions
-- **Binary Management**: yt-dlp and Deno downloaded at first run, not bundled
-
-## Tech Stack
-
-- **Frontend**: React 18, Vite 5, Tailwind CSS v4, Zustand
-- **Backend**: Electron 28, Node.js 20, better-sqlite3
-- **External**: yt-dlp, Deno runtime, Whisper.cpp
-- **Testing**: Vitest (unit/integration), Playwright (E2E)
+- Use the `developing-gtk-apps` and `designing-gnome-ui` skills for widget, threading, and HIG decisions rather than deriving them again.
+- Edit files with the Edit tool. Do not rewrite Rust sources through `python3 - <<PY` heredocs or `sed -i`.
+- The sibling apps (brain, familiar, planner, stickies) share this layout and these scripts; a pattern established in one is the pattern here.
