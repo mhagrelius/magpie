@@ -143,10 +143,17 @@ impl AddDialog {
 
     fn build(&self) {
         self.set_title("Add Download");
-        self.set_content_width(520);
-        // No content height: the dialog takes its natural one, which is bounded
-        // because the item list scrolls at 220px. Fixing it would leave a band of
-        // empty sheet under a single video's four rows.
+        // Fit to content, which is the only sizing that suits all three states:
+        // a spinner, one video's four rows, and a playlist's capped item list are
+        // very different heights, and any fixed number is wrong for two of them.
+        // Bounded in practice because the item list scrolls at 220px and the
+        // preferences page scrolls beyond the screen.
+        self.set_follows_content_size(true);
+        // `content_width` is deliberately *not* set: `follows_content_size`
+        // ignores it, so the width has to come from the content asking for it.
+        // See the `width_request` on the stack below — a preferences page's own
+        // natural width is about 360px, which wraps every subtitle onto three
+        // lines and is what made this dialog look truncated.
 
         let cancel = gtk::Button::with_label("Cancel");
         cancel.connect_clicked(glib::clone!(
@@ -192,7 +199,13 @@ impl AddDialog {
 
         let stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
+            // Heights differ wildly between a spinner, one video and a playlist,
+            // so the stack must not force them to match.
             .vhomogeneous(false)
+            // The width the dialog ends up with, since it follows its content.
+            // Wide enough that a title, an uploader and the option subtitles read
+            // on one line each, and narrow enough to sit on a small laptop.
+            .width_request(560)
             .build();
         stack.add_named(&self.build_looking_up(), Some("looking-up"));
         stack.add_named(&self.build_ready(), Some("ready"));
@@ -229,19 +242,20 @@ impl AddDialog {
         page.upcast()
     }
 
+    /// The filled-in state.
+    ///
+    /// `AdwPreferencesPage` scrolls on its own. An earlier version wrapped it in a
+    /// `GtkScrolledWindow` as well, which nested two scrollers and left the outer
+    /// one reporting a natural height that had nothing to do with the content —
+    /// so the dialog opened too short and cut the options off. The page goes in
+    /// directly.
     fn build_ready(&self) -> gtk::Widget {
         let page = adw::PreferencesPage::new();
         page.add(&self.build_preview());
         page.add(&self.build_items());
         page.add(&self.build_options());
         page.add(&self.build_destination());
-
-        gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .child(&page)
-            .build()
-            .upcast()
+        page.upcast()
     }
 
     fn build_preview(&self) -> adw::PreferencesGroup {

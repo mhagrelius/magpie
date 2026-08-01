@@ -97,6 +97,19 @@ impl Settings {
         self.simultaneous_downloads = self
             .simultaneous_downloads
             .clamp(1, super::queue::MAX_PARALLELISM);
+        // A non-positive size is not a small window, it is a size that was never
+        // recorded — GTK reports 0 for a window that is already unmapped, which is
+        // what shutdown used to read. Clamping that to the minimum produced a
+        // 360x294 window on the next launch and looked like Magpie had forgotten
+        // how big it should be. Fall back to the default instead, which also
+        // repairs a config file already written with zeroes.
+        let default = Self::default();
+        if self.window_width <= 0 {
+            self.window_width = default.window_width;
+        }
+        if self.window_height <= 0 {
+            self.window_height = default.window_height;
+        }
         self.window_width = self.window_width.clamp(360, 10_000);
         self.window_height = self.window_height.clamp(294, 10_000);
         self.rate_limit = self.rate_limit.filter(|rate| is_rate(rate));
@@ -177,11 +190,26 @@ mod tests {
     fn a_hand_edited_file_cannot_produce_an_unusable_window() {
         let settings = Settings {
             window_width: 1,
-            window_height: -400,
+            window_height: 5,
             ..Settings::default()
         }
         .sanitised();
         assert!(settings.window_width >= 360 && settings.window_height >= 294);
+    }
+
+    #[test]
+    fn a_size_that_was_never_recorded_comes_back_as_the_default() {
+        // GTK reports 0 for an unmapped window, which is what shutdown read; the
+        // result was a config full of zeroes and a 360x294 window on next launch.
+        // Zero means "unknown", not "tiny".
+        let settings = Settings {
+            window_width: 0,
+            window_height: 0,
+            ..Settings::default()
+        }
+        .sanitised();
+        assert_eq!(settings.window_width, Settings::default().window_width);
+        assert_eq!(settings.window_height, Settings::default().window_height);
     }
 
     #[test]

@@ -95,7 +95,7 @@ fn main() {
         true,
     );
     dialog.show_media(Info::Single(single_video()));
-    render_dialog(&dialog, 520, 620, &format!("{out}/add-video-{suffix}.png"));
+    render_dialog(&dialog, 360, 200, &format!("{out}/add-video-{suffix}.png"));
 
     // The same dialog for a playlist: the item picker, and no transcript switch.
     let playlist_dialog = AddDialog::new(
@@ -107,8 +107,8 @@ fn main() {
     playlist_dialog.show_media(Info::Collection(playlist()));
     render_dialog(
         &playlist_dialog,
-        520,
-        700,
+        360,
+        200,
         &format!("{out}/add-playlist-{suffix}.png"),
     );
 
@@ -123,8 +123,8 @@ fn main() {
     failed_dialog.show_failure(&Failure::SignInRequired);
     render_dialog(
         &failed_dialog,
-        520,
-        420,
+        360,
+        200,
         &format!("{out}/add-failed-{suffix}.png"),
     );
 
@@ -373,11 +373,22 @@ fn render_window(window: &MagpieWindow, width: i32, height: i32, path: &str) {
 }
 
 /// A dialog's child, for the same reason.
+///
+/// The size is *measured*, not passed in. An earlier version took width and
+/// height arguments, which meant every picture showed whatever the caller
+/// guessed rather than what the dialog would actually do — so a dialog that
+/// opened too short for its content looked fine here. `width` and `height` are
+/// now floors only.
 fn render_dialog(dialog: &impl IsA<adw::Dialog>, width: i32, height: i32, path: &str) {
     let dialog = dialog.as_ref();
     if let Some(child) = dialog.child() {
         dialog.set_child(gtk::Widget::NONE);
-        render(&child, width, height, path);
+
+        let (_, natural_width, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+        let natural_width = natural_width.max(width);
+        let (_, natural_height, _, _) = child.measure(gtk::Orientation::Vertical, natural_width);
+
+        render(&child, natural_width, natural_height.max(height), path);
     }
 }
 

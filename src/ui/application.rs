@@ -224,15 +224,22 @@ impl MagpieApplication {
         }
     }
 
+    /// Record the window's size, if it still has one to report.
+    ///
+    /// `width()` and `height()` return 0 once the window is unmapped, and
+    /// `shutdown` runs late enough that they often do. Writing those zeroes over a
+    /// good stored size is how the window came back at its minimum size on the
+    /// next launch, so a non-positive reading is discarded rather than saved.
     fn remember_geometry(&self) {
         let Some(window) = self.imp().window.borrow().clone() else {
             return;
         };
+        let (width, height) = (window.width(), window.height());
         let mut settings = self.imp().settings.borrow_mut();
         settings.window_maximized = window.is_maximized();
-        if !window.is_maximized() {
-            settings.window_width = window.width();
-            settings.window_height = window.height();
+        if !window.is_maximized() && width > 0 && height > 0 {
+            settings.window_width = width;
+            settings.window_height = height;
         }
     }
 
@@ -297,7 +304,13 @@ impl MagpieApplication {
 
     fn install_actions(&self) {
         let quit = gio::ActionEntry::builder("quit")
-            .activate(|app: &Self, _, _| app.quit())
+            .activate(|app: &Self, _, _| {
+                // While the window still exists. Ctrl+Q does not fire
+                // `close-request`, so without this the only reading came from
+                // `shutdown`, by which time the window is unmapped and reports 0.
+                app.remember_geometry();
+                app.quit();
+            })
             .build();
         let preferences = gio::ActionEntry::builder("preferences")
             .activate(|app: &Self, _, _| app.show_preferences(None))

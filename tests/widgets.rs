@@ -215,6 +215,28 @@ fn add_dialog_states() {
     assert_eq!(stack.visible_child_name().as_deref(), Some("ready"));
     assert!(download.is_sensitive());
 
+    // The dialog sizes itself to its content, and the content asks for a width
+    // wide enough to read. An earlier version wrapped the preferences page in a
+    // second ScrolledWindow — the page scrolls on its own — which left the outer
+    // one reporting a natural height unrelated to the content, so the dialog
+    // opened too short and cut the options off.
+    assert!(
+        dialog.follows_content_size(),
+        "fit to content, not a fixed guess"
+    );
+    let child = dialog.child().expect("a child");
+    let (_, natural_width, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+    assert!(
+        natural_width >= 520,
+        "a preferences page's own natural width is ~360, which wraps every \
+         subtitle: got {natural_width}"
+    );
+    let (_, natural_height, _, _) = child.measure(gtk::Orientation::Vertical, natural_width);
+    assert!(
+        natural_height > 300,
+        "the whole form has to fit, not a collapsed scroller: got {natural_height}"
+    );
+
     // Audio only swaps which format row is on show, rather than adding a third
     // control that contradicts the other two.
     let switches = find_all::<adw::SwitchRow>(dialog.upcast_ref());
