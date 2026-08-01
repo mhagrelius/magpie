@@ -1,3 +1,4 @@
+pub mod diarize;
 pub mod failure;
 pub mod job;
 pub mod library;
@@ -7,6 +8,7 @@ pub mod quality;
 pub mod queue;
 pub mod request;
 pub mod settings;
+pub mod speakers;
 pub mod store;
 pub mod tools;
 pub mod transcript;

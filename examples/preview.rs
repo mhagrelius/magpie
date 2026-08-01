@@ -93,6 +93,7 @@ fn main() {
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
         true,
+        true,
     );
     dialog.show_media(Info::Single(single_video()));
     render_dialog(&dialog, 360, 200, &format!("{out}/add-video-{suffix}.png"));
@@ -102,6 +103,7 @@ fn main() {
         "https://www.youtube.com/playlist?list=PL1",
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
+        true,
         true,
     );
     playlist_dialog.show_media(Info::Collection(playlist()));
@@ -118,6 +120,7 @@ fn main() {
         "https://youtu.be/private",
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
+        false,
         false,
     );
     failed_dialog.show_failure(&Failure::SignInRequired);
@@ -150,6 +153,22 @@ fn main() {
         640,
         700,
         &format!("{out}/preferences-{suffix}.png"),
+    );
+
+    // The Transcripts page, on a machine that has the diarizer, so the Speakers
+    // group renders in its usable state rather than greyed out.
+    let transcripts = Preferences::new(
+        &Settings::default(),
+        &full_toolbox(),
+        PathBuf::from("/tmp/magpie-preview/models"),
+        PathBuf::from("/home/matty/Downloads"),
+    );
+    transcripts.set_visible_page_name("transcripts");
+    render_dialog(
+        &transcripts,
+        640,
+        760,
+        &format!("{out}/transcripts-{suffix}.png"),
     );
 
     println!("wrote {out}/*-{suffix}.png");
@@ -360,6 +379,28 @@ fn partial_toolbox() -> ToolReport {
         // Absent, which is the state worth looking at: it is the one degradation
         // that costs formats without saying so.
         js_runtime: None,
+        // Absent too, so the Speakers group renders in the state most people
+        // will first meet it in.
+        diarizer: None,
+    }
+}
+
+/// Everything present, for the pages whose interesting state is the one where a
+/// feature is actually available.
+fn full_toolbox() -> ToolReport {
+    let found = |path: &str| {
+        Some(Found {
+            path: PathBuf::from(path),
+            version: None,
+        })
+    };
+    ToolReport {
+        whisper: found("/home/matty/.local/bin/whisper-cli"),
+        diarizer: found(
+            "/home/matty/.local/lib/magpie/bin/sherpa-onnx-offline-speaker-diarization",
+        ),
+        freshness: Freshness::Fresh,
+        ..partial_toolbox()
     }
 }
 

@@ -20,6 +20,7 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 use gtk::glib::subclass::Signal;
 
+use crate::model::diarize::{self, Asset};
 use crate::model::progress::format_bytes;
 use crate::model::quality::{AudioFormat, Quality};
 use crate::model::queue::MAX_PARALLELISM;
@@ -60,6 +61,13 @@ mod imp {
         pub transcript_format_row: OnceCell<adw::ComboRow>,
         pub language_row: OnceCell<adw::ComboRow>,
         pub transcribe_default_row: OnceCell<adw::SwitchRow>,
+
+        pub speakers_row: OnceCell<adw::SwitchRow>,
+        pub speaker_count_row: OnceCell<adw::ComboRow>,
+        pub speaker_models_status: OnceCell<adw::ActionRow>,
+        pub speaker_models_button: OnceCell<gtk::Button>,
+        pub speaker_models_progress: OnceCell<gtk::ProgressBar>,
+        pub speaker_download: RefCell<Option<toolbox::ModelDownload>>,
 
         /// Widgets are kept beside their row rather than found by walking the
         /// row's children, which breaks the moment a suffix is added.
@@ -141,6 +149,9 @@ impl Preferences {
     pub fn set_report(&self, report: &Report) {
         self.imp().report.replace(report.clone());
         self.refresh_tools();
+        // The Speakers switch is only usable when the diarizer is there, so a
+        // rescan that finds one has to reach that group too.
+        self.refresh_speakers();
     }
 
     fn build(&self) {
@@ -429,6 +440,41 @@ impl Preferences {
         output.add(&language_row);
         output.add(&transcribe_default_row);
 
+        let speakers_row = adw::SwitchRow::builder()
+            .title("Identify speakers")
+            .subtitle("Work out how many people are talking and mark each line")
+            .build();
+
+        let mut counts = vec![diarize::Count::Detect.label()];
+        counts.extend((1..=diarize::Count::MAX).map(|n| diarize::Count::Fixed(n).label()));
+        let speaker_count_row = adw::ComboRow::builder()
+            .title("Number of speakers")
+            .subtitle("Saying how many is more reliable than letting it guess")
+            .model(&string_list(counts.iter().map(String::as_str)))
+            .build();
+
+        let speaker_models_button = gtk::Button::builder().valign(gtk::Align::Center).build();
+        let speaker_models_progress = gtk::ProgressBar::builder()
+            .visible(false)
+            .valign(gtk::Align::Center)
+            .width_request(120)
+            .build();
+        let speaker_models_status = adw::ActionRow::builder().title("Speaker models").build();
+        speaker_models_status.add_suffix(&speaker_models_progress);
+        speaker_models_status.add_suffix(&speaker_models_button);
+
+        let speakers = adw::PreferencesGroup::builder()
+            .title("Speakers")
+            .description(
+                "Telling voices apart needs sherpa-onnx and two models of its own. \
+                 Names are guessed from what people call each other, so they are a \
+                 suggestion rather than a fact.",
+            )
+            .build();
+        speakers.add(&speakers_row);
+        speakers.add(&speaker_count_row);
+        speakers.add(&speaker_models_status);
+
         page.add(&{
             // A banner belongs at the top of the content it qualifies, and an
             // AdwPreferencesPage takes groups, so it travels inside one.
@@ -438,6 +484,7 @@ impl Preferences {
         });
         page.add(&models);
         page.add(&output);
+        page.add(&speakers);
 
         model_row.connect_selected_notify(glib::clone!(
             #[weak(rename_to = dialog)]
@@ -483,6 +530,45 @@ impl Preferences {
             self,
             move |_| dialog.model_button_pressed()
         ));
+        speakers_row.connect_active_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |row| {
+                let count = dialog
+                    .imp()
+                    .speaker_count_row
+                    .get()
+                    .map(|row| count_at(row.selected()))
+                    .unwrap_or_default();
+                dialog.imp().settings.borrow_mut().transcript.diarize =
+                    row.is_active().then_some(diarize::Wish { count });
+                dialog.changed();
+                dialog.refresh_speakers();
+            }
+        ));
+        speaker_count_row.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |row| {
+                let count = count_at(row.selected());
+                if let Some(wish) = dialog
+                    .imp()
+                    .settings
+                    .borrow_mut()
+                    .transcript
+                    .diarize
+                    .as_mut()
+                {
+                    wish.count = count;
+                }
+                dialog.changed();
+            }
+        ));
+        speaker_models_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.speaker_models_button_pressed()
+        ));
 
         let imp = self.imp();
         let _ = imp.model_row.set(model_row);
@@ -492,6 +578,11 @@ impl Preferences {
         let _ = imp.transcript_format_row.set(transcript_format_row);
         let _ = imp.language_row.set(language_row);
         let _ = imp.transcribe_default_row.set(transcribe_default_row);
+        let _ = imp.speakers_row.set(speakers_row);
+        let _ = imp.speaker_count_row.set(speaker_count_row);
+        let _ = imp.speaker_models_status.set(speaker_models_status);
+        let _ = imp.speaker_models_button.set(speaker_models_button);
+        let _ = imp.speaker_models_progress.set(speaker_models_progress);
         let _ = imp.whisper_banner.set(banner);
         page
     }
@@ -529,6 +620,7 @@ impl Preferences {
             Tool::Ffmpeg,
             Tool::Ffprobe,
             Tool::Whisper,
+            Tool::Diarizer,
         ] {
             let row = adw::ActionRow::builder().title(tool.label()).build();
 
@@ -628,6 +720,10 @@ impl Preferences {
                 .unwrap_or(0),
         );
         select(
+            imp.speaker_count_row.get(),
+            count_index(settings.transcript.diarize.unwrap_or_default().count),
+        );
+        select(
             imp.cookies_row.get(),
             settings
                 .cookies_from_browser
@@ -646,6 +742,9 @@ impl Preferences {
         if let Some(row) = imp.transcribe_default_row.get() {
             row.set_active(settings.transcribe_by_default);
         }
+        if let Some(row) = imp.speakers_row.get() {
+            row.set_active(settings.transcript.identifies_speakers());
+        }
         if let Some(row) = imp.parallel_row.get() {
             row.set_value(settings.simultaneous_downloads as f64);
         }
@@ -655,6 +754,7 @@ impl Preferences {
 
         self.refresh_folder();
         self.refresh_model_status();
+        self.refresh_speakers();
         self.refresh_tools();
         self.refresh_ffmpeg_warning();
         imp.loading.set(false);
@@ -949,6 +1049,165 @@ impl Preferences {
         }
     }
 
+    /// Keep the Speakers group honest about what is installed.
+    ///
+    /// Three things have to line up before this can run — the tool, both models,
+    /// and whisper — and when one is missing the row says which rather than
+    /// offering a switch that silently does nothing.
+    fn refresh_speakers(&self) {
+        let imp = self.imp();
+        let has_tool = imp.report.borrow().has_diarizer();
+        let wanted = imp.settings.borrow().transcript.identifies_speakers();
+
+        if let Some(row) = imp.speakers_row.get() {
+            row.set_sensitive(has_tool);
+            row.set_subtitle(if has_tool {
+                "Work out how many people are talking and mark each line"
+            } else {
+                "Needs sherpa-onnx — see the Tools page"
+            });
+        }
+        if let Some(row) = imp.speaker_count_row.get() {
+            row.set_sensitive(has_tool && wanted);
+        }
+
+        let (Some(row), Some(button), Some(progress)) = (
+            imp.speaker_models_status.get(),
+            imp.speaker_models_button.get(),
+            imp.speaker_models_progress.get(),
+        ) else {
+            return;
+        };
+        if imp.speaker_download.borrow().is_some() {
+            return;
+        }
+
+        let models_dir = imp.models_dir.borrow().clone();
+        progress.set_visible(false);
+
+        if toolbox::diarize_models_on_disk(&models_dir) {
+            let size: u64 = Asset::ALL
+                .iter()
+                .filter_map(|asset| toolbox::diarize_asset_on_disk(&models_dir, *asset))
+                .sum();
+            row.set_subtitle(&format!("Segmentation and voices · {}", format_bytes(size)));
+            button.set_label("Remove");
+            button.remove_css_class("suggested-action");
+            button.add_css_class("destructive-action");
+        } else {
+            row.set_subtitle(&format!(
+                "Not downloaded · {}",
+                format_bytes(diarize::total_bytes())
+            ));
+            button.set_label("Download");
+            button.remove_css_class("destructive-action");
+            button.add_css_class("suggested-action");
+        }
+    }
+
+    fn speaker_models_button_pressed(&self) {
+        let imp = self.imp();
+        let models_dir = imp.models_dir.borrow().clone();
+
+        // Already downloading: this press is a cancel.
+        if let Some(download) = imp.speaker_download.borrow_mut().take() {
+            download.cancel();
+            self.refresh_speakers();
+            return;
+        }
+
+        if toolbox::diarize_models_on_disk(&models_dir) {
+            self.confirm_speaker_model_removal(models_dir);
+            return;
+        }
+
+        let (Some(progress), Some(button)) = (
+            imp.speaker_models_progress.get(),
+            imp.speaker_models_button.get(),
+        ) else {
+            return;
+        };
+        progress.set_fraction(0.0);
+        progress.set_visible(true);
+        button.set_label("Cancel");
+        button.remove_css_class("suggested-action");
+        button.remove_css_class("destructive-action");
+        if let Some(row) = imp.speaker_models_status.get() {
+            row.set_subtitle(&format!(
+                "Downloading · about {}",
+                format_bytes(diarize::total_bytes())
+            ));
+        }
+
+        let dialog = self.downgrade();
+        let download = toolbox::download_diarize_models(
+            &models_dir,
+            {
+                let dialog = dialog.clone();
+                move |fraction| {
+                    if let Some(dialog) = dialog.upgrade() {
+                        if let Some(progress) = dialog.imp().speaker_models_progress.get() {
+                            progress.set_fraction(fraction);
+                        }
+                    }
+                }
+            },
+            move |result| {
+                let Some(dialog) = dialog.upgrade() else {
+                    return;
+                };
+                dialog.imp().speaker_download.replace(None);
+                if let Err(error) = &result {
+                    if error != "cancelled" {
+                        if let Some(row) = dialog.imp().speaker_models_status.get() {
+                            row.set_subtitle(&format!("Download failed · {error}"));
+                        }
+                    }
+                }
+                dialog.refresh_speakers();
+                dialog.changed();
+            },
+        );
+        imp.speaker_download.replace(Some(download));
+    }
+
+    fn confirm_speaker_model_removal(&self, models_dir: PathBuf) {
+        let alert = adw::AlertDialog::builder()
+            .heading("Remove the speaker models?")
+            .body(format!(
+                "Both files will be deleted. Downloading them again takes about {}.",
+                format_bytes(diarize::total_bytes())
+            ))
+            .build();
+        alert.add_response("cancel", "Cancel");
+        alert.add_response("remove", "Remove");
+        alert.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        alert.set_default_response(Some("cancel"));
+        alert.set_close_response("cancel");
+
+        let removed = Rc::new(Cell::new(false));
+        alert.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = dialog)]
+                self,
+                #[strong]
+                removed,
+                move |_, response| {
+                    if response != "remove" || removed.replace(true) {
+                        return;
+                    }
+                    for asset in Asset::ALL {
+                        let _ = std::fs::remove_file(asset.path_in(&models_dir));
+                    }
+                    dialog.refresh_speakers();
+                    dialog.changed();
+                }
+            ),
+        );
+        alert.present(Some(self));
+    }
+
     fn choose_folder(&self) {
         let imp = self.imp();
         let current = imp
@@ -1080,6 +1339,22 @@ impl Preferences {
             ),
         );
         alert.present(Some(self));
+    }
+}
+
+/// The speaker count a row position stands for. Index zero is "detect".
+fn count_at(selected: u32) -> diarize::Count {
+    match selected {
+        0 => diarize::Count::Detect,
+        n => diarize::Count::Fixed((n as u8).min(diarize::Count::MAX)),
+    }
+}
+
+/// The row position for a speaker count, the inverse of [`count_at`].
+fn count_index(count: diarize::Count) -> u32 {
+    match count {
+        diarize::Count::Detect => 0,
+        diarize::Count::Fixed(n) => n.clamp(1, diarize::Count::MAX) as u32,
     }
 }
 

@@ -124,6 +124,54 @@ Only for a single download, never for a collection: transcribing forty playlist
 items is an afternoon of CPU nobody asked for by flipping one switch, so the
 switch is not offered for a playlist at all.
 
+### Who is speaking
+
+A transcript of a conversation with no attribution is a wall of text in which
+nobody can find who said what. With **Identify speakers** on, a finished
+transcript is handed to sherpa-onnx's diarizer, and every line comes back
+labelled.
+
+Two models, because it is two problems: pyannote segmentation 3.0 finds the
+stretches of speech, and a WeSpeaker embedding turns each stretch into a vector.
+Clustering those vectors is what makes the count an *answer* rather than a
+setting — the number of clusters is the number of people. The user can override
+it when they know, and saying "two" is meaningfully more reliable than letting
+the threshold decide.
+
+This is a second tool rather than a whisper flag because whisper has nothing that
+does it. `--diarize` compares the loudness of a stereo file's two channels, which
+says nothing about a mono download; `--tinydiarize` marks where the speaker
+changes but never says whether a returning voice is one already heard, so it
+cannot count. Neither answers the question.
+
+Three parts, and only the middle one runs a process:
+
+1. whisper is asked for a subtitle file as well as the chosen format, because
+   plain text has no timestamps to align against. When the user wanted subtitles
+   anyway, that file *is* their output and there is no extra one.
+2. sherpa-onnx reads the same 16 kHz scratch wav the transcript used and prints
+   `1.583 -- 3.406 speaker_00` lines. Asking for speakers therefore forces the
+   ffmpeg conversion even for audio whisper would have taken as it stood — the
+   diarizer reads 16 kHz WAV and refuses everything else.
+3. `model::speakers` joins the two, giving each cue the voice that spoke most of
+   it by total overlap, and renders the result.
+
+Clustering returns sparse labels — a real two-speaker file came back as
+`speaker_00` and `speaker_03` — so speakers are renumbered by who talks first.
+Printing the raw ids would report a two-hander between Speaker 1 and Speaker 4.
+
+Names are then guessed from what people call each other: "I'm Alice" names the
+speaker, "thanks, Priya" names whoever just finished, "over to you, Marcus" names
+whoever starts next. It is a heuristic and is treated as one — a name has to win
+a vote, no two voices can share one, and the fallback is always the honest
+number. The preferences page says so in as many words, because a wrong name is
+worse than "Speaker 2": a reader cannot tell that it is wrong.
+
+Failure here never costs the transcript. The words are already written and took
+ten minutes; the attribution takes seconds and can be missing. Every way this
+stage can fail ends with the plain transcript kept and a toast saying why it has
+no names on it.
+
 ### The library
 
 Every finished download is recorded in `~/.local/share/magpie/library.json`:
@@ -192,6 +240,8 @@ src/
     settings.rs       config.json. Load never writes.
     tools.rs          Which external tools exist, where, how old.
     transcript.rs     whisper-cli argument vector and progress parsing.
+    diarize.rs        sherpa-onnx argument vector, turn and progress parsing.
+    speakers.rs       Turns + subtitle cues -> a transcript with names on it.
 
   ui/
     application.rs    MagpieApplication. Owns state; the only thing that writes.
@@ -374,6 +424,21 @@ not to this document.
   A bundled copy goes in `/usr/lib/magpie` or `/app/lib/magpie`, never on `PATH`,
   and `model::tools::candidates` searches those **last** — so a whisper.cpp the
   user or the distribution installs later always wins over ours.
+- **sherpa-onnx is fetched, not built, and that is the same argument applied
+  honestly.** It has the same lack of rot as whisper.cpp — local inference
+  against pinned model files — so it earns the same pinned-and-bundled treatment.
+  The difference is that upstream already publishes a prebuilt Linux binary for
+  every release, so compiling it here would mean requiring CMake, a C++ toolchain
+  and ONNX Runtime to arrive at a file identical to one already sitting on a
+  release page. whisper.cpp gets built only because nobody publishes a usable
+  Linux `whisper-cli`.
+
+  `packaging/fetch-diarizer.sh` pins v1.13.4 and installs into
+  `lib/magpie/bin` with the shared libraries in a sibling `lib/`, because the
+  binary is linked with `RPATH=$ORIGIN/../lib` and will not start from anywhere
+  else. The script runs `--help` before declaring success: for a downloaded
+  tarball the likeliest fault is a shared library that will not load, and that
+  failure would otherwise stay invisible until someone's first transcript.
 - **No Deno management, but the runtime is not ignored either.** This started as
   a flat dismissal — "yt-dlp finds a JavaScript runtime itself" — which is true and
   was the wrong conclusion. Run a current yt-dlp against YouTube with no engine

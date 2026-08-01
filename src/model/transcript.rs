@@ -133,6 +133,38 @@ pub struct Wish {
     pub format: Format,
     /// An ISO language code, or `None` to let whisper detect it.
     pub language: Option<String>,
+    /// Whether to work out who is speaking once the words exist, and how many
+    /// voices to look for.
+    ///
+    /// `default` so that a `library.json` written before this existed still
+    /// loads. A queue that fails to parse is a queue the user loses.
+    #[serde(default)]
+    pub diarize: Option<super::diarize::Wish>,
+}
+
+impl Wish {
+    pub fn identifies_speakers(&self) -> bool {
+        self.diarize.is_some()
+    }
+
+    /// The file the speaker pass reads its timings from.
+    ///
+    /// Whisper's plain-text output has no timestamps, so there is nothing to
+    /// align turns against. Rather than parse the segments off stdout — which
+    /// `--no-prints` does not silence but does not promise either — the job asks
+    /// whisper for a subtitle file as well and reads that. When the user already
+    /// wanted subtitles, that file *is* their output and no extra one exists.
+    pub fn timing_format(&self) -> Format {
+        match self.format {
+            Format::Text => Format::Srt,
+            other => other,
+        }
+    }
+
+    /// Whether the timing file is a scratch file to be deleted afterwards.
+    pub fn timing_file_is_scratch(&self) -> bool {
+        self.format == Format::Text
+    }
 }
 
 /// Containers whisper.cpp reads directly. Everything else goes through ffmpeg.
@@ -141,6 +173,18 @@ pub struct Wish {
 /// download usually produces, and every video container. So the conversion path
 /// is the common one, not the exception.
 const NATIVE: [&str; 4] = ["wav", "mp3", "flac", "ogg"];
+
+/// Whether the audio has to be converted before this job can run at all.
+///
+/// Stricter than [`needs_conversion`] when speakers are wanted, and deliberately.
+/// whisper reads mp3, flac and ogg at whatever rate they happen to be; the
+/// diarizer reads 16 kHz WAV and refuses everything else, including a WAV at
+/// 44.1 kHz. So a download that whisper would have taken as it stands still gets
+/// converted once someone asks who is speaking — one ffmpeg pass, rather than
+/// discovering the mismatch after the transcript has already been produced.
+pub fn needs_conversion_for(media: &Path, wish: &Wish) -> bool {
+    needs_conversion(media) || wish.identifies_speakers()
+}
 
 /// Whether this file has to be converted before whisper will read it.
 pub fn needs_conversion(media: &Path) -> bool {
@@ -209,6 +253,17 @@ pub fn argv(model_path: &Path, audio: &Path, output_stem: &Path, wish: &Wish) ->
         "-of".to_string(),
         output_stem.display().to_string(),
     ];
+
+    // Identifying speakers needs timestamps to align against, and plain text has
+    // none. Asking for both in one run is free — whisper writes as many formats
+    // as it is asked for from the one decode — where a second run would be the
+    // whole transcription over again.
+    if wish.identifies_speakers() {
+        let timing = wish.timing_format().flag().to_string();
+        if !args.contains(&timing) {
+            args.push(timing);
+        }
+    }
 
     if let Some(language) = &wish.language {
         args.push("-l".to_string());
@@ -383,6 +438,90 @@ mod tests {
         ] {
             assert_eq!(parse_progress(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn asking_who_is_speaking_converts_audio_whisper_would_have_taken_as_it_is() {
+        // The diarizer reads 16 kHz WAV and nothing else — not a 44.1 kHz WAV,
+        // not the mp3 whisper is perfectly happy with.
+        let speakers = Wish {
+            diarize: Some(Default::default()),
+            ..Wish::default()
+        };
+        for name in ["clip.wav", "clip.mp3", "clip.flac", "clip.ogg"] {
+            let path = Path::new(name);
+            assert!(!needs_conversion(path), "{name}");
+            assert!(needs_conversion_for(path, &speakers), "{name}");
+            assert!(!needs_conversion_for(path, &Wish::default()), "{name}");
+        }
+    }
+
+    #[test]
+    fn identifying_speakers_asks_for_timestamps_alongside_plain_text() {
+        // Plain text has no timings, so there would be nothing to align the
+        // speaker turns against.
+        let wish = Wish {
+            format: Format::Text,
+            diarize: Some(Default::default()),
+            ..Wish::default()
+        };
+        let args = argv(
+            Path::new("/m.bin"),
+            Path::new("/a.wav"),
+            Path::new("/out"),
+            &wish,
+        );
+        assert!(args.contains(&"--output-txt".to_string()), "{args:?}");
+        assert!(args.contains(&"--output-srt".to_string()), "{args:?}");
+        assert_eq!(wish.timing_format(), Format::Srt);
+        assert!(wish.timing_file_is_scratch());
+    }
+
+    #[test]
+    fn a_subtitle_transcript_needs_no_second_file_to_get_its_timings() {
+        // The user's own output already has the timestamps, so asking for
+        // another format would leave a stray file next to their video.
+        for format in [Format::Srt, Format::Vtt] {
+            let wish = Wish {
+                format,
+                diarize: Some(Default::default()),
+                ..Wish::default()
+            };
+            let args = argv(
+                Path::new("/m.bin"),
+                Path::new("/a.wav"),
+                Path::new("/out"),
+                &wish,
+            );
+            let outputs = args.iter().filter(|a| a.starts_with("--output-")).count();
+            assert_eq!(outputs, 1, "{format:?} {args:?}");
+            assert_eq!(wish.timing_format(), format);
+            assert!(!wish.timing_file_is_scratch(), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn not_asking_for_speakers_changes_nothing_about_the_command() {
+        let plain = argv(
+            Path::new("/m.bin"),
+            Path::new("/a.wav"),
+            Path::new("/out"),
+            &Wish::default(),
+        );
+        assert_eq!(
+            plain.iter().filter(|a| a.starts_with("--output-")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_wish_saved_before_speakers_existed_still_loads() {
+        // `library.json` survives upgrades, and a queue that fails to parse is a
+        // queue the user loses.
+        let wish: Wish =
+            serde_json::from_str(r#"{"model":"small","format":"text","language":null}"#).unwrap();
+        assert_eq!(wish.diarize, None);
+        assert!(!wish.identifies_speakers());
     }
 
     #[test]

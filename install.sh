@@ -4,7 +4,8 @@
 # everything lands under ~/.local.
 #
 #   ./install.sh
-#   ./install.sh --with-whisper    also build whisper.cpp, for transcripts
+#   ./install.sh --with-whisper     also build whisper.cpp, for transcripts
+#   ./install.sh --with-diarizer    also fetch sherpa-onnx, to identify speakers
 #   PREFIX=/usr/local sudo ./install.sh
 #
 set -euo pipefail
@@ -12,8 +13,10 @@ set -euo pipefail
 APP_ID="us.hagreli.Magpie"
 
 WITH_WHISPER=""
+WITH_DIARIZER=""
 for arg in "$@"; do
   [[ "$arg" == "--with-whisper" ]] && WITH_WHISPER=1
+  [[ "$arg" == "--with-diarizer" ]] && WITH_DIARIZER=1
 done
 
 PREFIX="${PREFIX:-$HOME/.local}"
@@ -107,6 +110,15 @@ if [[ -n "$WITH_WHISPER" ]]; then
   PREFIX="$PREFIX" packaging/build-whisper.sh
 elif ! command -v whisper-cli >/dev/null && ! command -v whisper-cpp >/dev/null; then
   missing+=("whisper.cpp — optional, only for transcripts. Run ./install.sh --with-whisper")
+fi
+
+if [[ -n "$WITH_DIARIZER" ]]; then
+  echo
+  say "Fetching sherpa-onnx, to identify speakers"
+  PREFIX="$PREFIX" packaging/fetch-diarizer.sh
+elif ! command -v sherpa-onnx-offline-speaker-diarization >/dev/null \
+  && [[ ! -x "$PREFIX/lib/magpie/bin/sherpa-onnx-offline-speaker-diarization" ]]; then
+  missing+=("sherpa-onnx — optional, only to mark who is speaking in a transcript. Run ./install.sh --with-diarizer")
 fi
 
 if (( ${#missing[@]} )); then

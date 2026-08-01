@@ -46,6 +46,10 @@ const CASES: &[Case] = &[
         "a missing tool is explained, not hidden",
         preferences_missing_tools,
     ),
+    (
+        "the speaker switch follows what is installed",
+        preferences_speakers,
+    ),
     ("the shortcuts dialog lists the accelerators", shortcuts),
 ];
 
@@ -198,6 +202,7 @@ fn add_dialog_states() {
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
         true,
+        true,
     );
     dialog.present(gtk::Widget::NONE);
     settle();
@@ -278,6 +283,7 @@ fn add_dialog_playlist() {
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
         true,
+        true,
     );
     dialog.present(gtk::Widget::NONE);
     dialog.show_media(Info::Collection(playlist()));
@@ -300,6 +306,14 @@ fn add_dialog_playlist() {
     assert!(!transcribe.get_visible());
     assert!(!transcribe.is_active());
 
+    // And with no transcript there is nothing to attribute.
+    let identify = find_all::<adw::SwitchRow>(dialog.upcast_ref())
+        .into_iter()
+        .find(|row| row.title() == "Identify speakers")
+        .expect("the row still exists");
+    assert!(!identify.get_visible());
+    assert!(!identify.is_active());
+
     dialog.close();
 }
 
@@ -308,6 +322,7 @@ fn add_dialog_failure() {
         "https://youtu.be/private",
         &Settings::default(),
         PathBuf::from("/home/matty/Downloads"),
+        false,
         false,
     );
     dialog.present(gtk::Widget::NONE);
@@ -350,6 +365,17 @@ fn add_dialog_failure() {
     assert!(transcribe
         .tooltip_text()
         .is_some_and(|text| text.contains("whisper")));
+
+    // Same treatment, and the tooltip names the missing tool rather than the
+    // switch it depends on — this dialog was built with neither available.
+    let identify = find_all::<adw::SwitchRow>(dialog.upcast_ref())
+        .into_iter()
+        .find(|row| row.title() == "Identify speakers")
+        .expect("the Identify speakers row");
+    assert!(!identify.is_sensitive());
+    assert!(identify
+        .tooltip_text()
+        .is_some_and(|text| text.contains("sherpa-onnx")));
 
     dialog.close();
 }
@@ -450,6 +476,61 @@ fn preferences() -> Preferences {
     )
 }
 
+/// The Speakers group is only usable once sherpa-onnx is there, and says so
+/// rather than offering a switch that would silently do nothing.
+fn preferences_speakers() {
+    let preferences = preferences();
+    preferences.present(gtk::Widget::NONE);
+    settle();
+
+    let switch = find_all::<adw::SwitchRow>(preferences.clone().upcast_ref())
+        .into_iter()
+        .find(|row| row.title() == "Identify speakers")
+        .expect("the Identify speakers row");
+
+    // `report()` has no diarizer.
+    assert!(!switch.is_sensitive());
+    assert!(
+        switch
+            .subtitle()
+            .unwrap_or_default()
+            .contains("sherpa-onnx"),
+        "the subtitle names what is missing"
+    );
+
+    // The count is meaningless while the switch is off, so it is greyed too.
+    let count = find_all::<adw::ComboRow>(preferences.clone().upcast_ref())
+        .into_iter()
+        .find(|row| row.title() == "Number of speakers")
+        .expect("the count row");
+    assert!(!count.is_sensitive());
+    assert_eq!(
+        count.selected(),
+        0,
+        "detect automatically is the honest default"
+    );
+
+    // Found on a rescan: the group has to come to life without reopening the
+    // dialog.
+    let mut found = report();
+    found.diarizer = Some(Found {
+        path: PathBuf::from(
+            "/home/m/.local/lib/magpie/bin/sherpa-onnx-offline-speaker-diarization",
+        ),
+        version: None,
+    });
+    preferences.set_report(&found);
+    settle();
+
+    assert!(switch.is_sensitive(), "the switch wakes up on a rescan");
+    assert!(!switch
+        .subtitle()
+        .unwrap_or_default()
+        .contains("sherpa-onnx"));
+
+    preferences.close();
+}
+
 /// yt-dlp present but old, ffmpeg present, whisper absent — every branch of the
 /// Tools page at once.
 fn report() -> ToolReport {
@@ -476,6 +557,7 @@ fn report() -> ToolReport {
         // Absent, which is the state worth looking at: it is the one degradation
         // that costs formats without saying so.
         js_runtime: None,
+        diarizer: None,
     }
 }
 

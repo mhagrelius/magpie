@@ -5,6 +5,7 @@
 #   packaging/build-deb.sh                 build
 #   packaging/build-deb.sh --install       build, then install it with apt
 #   packaging/build-deb.sh --with-whisper  also build and include whisper-cli
+#   packaging/build-deb.sh --with-diarizer also include the sherpa-onnx diarizer
 #
 # Uses only dpkg-deb, dpkg-shlibdeps and fakeroot — no debhelper, no debuild.
 #
@@ -14,14 +15,21 @@
 # compiler, adds a couple of minutes, and a package that quietly grows a bundled
 # binary should do so because someone asked.
 #
+# `--with-diarizer` is the same bargain for identifying speakers, and cheaper:
+# upstream publishes a prebuilt binary, so it is a download rather than a build.
+# Off by default for the same reason — roughly 32 MB of binary and shared
+# libraries is not something a package should gain silently.
+#
 set -euo pipefail
 
 APP_ID="us.hagreli.Magpie"
 PKG="magpie"
 
 WITH_WHISPER=""
+WITH_DIARIZER=""
 for arg in "$@"; do
   [[ "$arg" == "--with-whisper" ]] && WITH_WHISPER=1
+  [[ "$arg" == "--with-diarizer" ]] && WITH_DIARIZER=1
 done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,6 +67,11 @@ EOF
 if [[ -n "$WITH_WHISPER" ]]; then
   say "Building whisper-cli to include"
   packaging/build-whisper.sh --staged "$STAGE"
+fi
+
+if [[ -n "$WITH_DIARIZER" ]]; then
+  say "Fetching the sherpa-onnx diarizer to include"
+  packaging/fetch-diarizer.sh --staged "$STAGE"
 fi
 
 install -Dm644 packaging/deb/copyright "$STAGE/usr/share/doc/$PKG/copyright"

@@ -7,3 +7,6 @@
 /packaging/flatpak/cargo-sources.json
 /packaging/flatpak/tools-sources.json
 /.whisper-build
+# The sherpa-onnx tarball and its unpacked tree, cached by
+# packaging/fetch-diarizer.sh so a re-run does not download 28 MB again.
+/.diarizer-build

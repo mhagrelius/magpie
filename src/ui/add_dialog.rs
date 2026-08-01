@@ -58,6 +58,7 @@ mod imp {
         pub info: RefCell<Option<Info>>,
         pub choice: RefCell<Option<Choice>>,
         pub whisper_available: std::cell::Cell<bool>,
+        pub diarizer_available: std::cell::Cell<bool>,
 
         pub stack: OnceCell<gtk::Stack>,
         pub download: OnceCell<gtk::Button>,
@@ -74,6 +75,7 @@ mod imp {
         pub audio_format: OnceCell<adw::ComboRow>,
         pub exact_format: OnceCell<adw::ComboRow>,
         pub transcribe: OnceCell<adw::SwitchRow>,
+        pub identify: OnceCell<adw::SwitchRow>,
         pub folder: OnceCell<adw::ActionRow>,
 
         pub items_group: OnceCell<adw::PreferencesGroup>,
@@ -119,13 +121,20 @@ glib::wrapper! {
 
 impl AddDialog {
     /// A dialog for `url`, showing the Looking-up state.
-    pub fn new(url: &str, settings: &Settings, destination: PathBuf, whisper: bool) -> Self {
+    pub fn new(
+        url: &str,
+        settings: &Settings,
+        destination: PathBuf,
+        whisper: bool,
+        diarizer: bool,
+    ) -> Self {
         let dialog: Self = glib::Object::new();
         let imp = dialog.imp();
         imp.url.replace(url.to_string());
         imp.settings.replace(settings.clone());
         imp.destination.replace(destination);
         imp.whisper_available.set(whisper);
+        imp.diarizer_available.set(diarizer);
         dialog.apply_defaults();
         dialog
     }
@@ -392,6 +401,19 @@ impl AddDialog {
             .subtitle("Write a text transcript next to the file")
             .build();
 
+        let identify = adw::SwitchRow::builder()
+            .title("Identify speakers")
+            .subtitle("Mark who is talking in the transcript")
+            .build();
+
+        // Nothing to attribute without a transcript, so the second switch follows
+        // the first rather than sitting there enabled and doing nothing.
+        transcribe.connect_active_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.refresh_identify_row()
+        ));
+
         audio_only.connect_active_notify(glib::clone!(
             #[weak(rename_to = dialog)]
             self,
@@ -409,8 +431,10 @@ impl AddDialog {
         group.add(&audio_format);
         group.add(&exact_format);
         group.add(&transcribe);
+        group.add(&identify);
 
         let imp = self.imp();
+        let _ = imp.identify.set(identify);
         let _ = imp.audio_only.set(audio_only);
         let _ = imp.quality.set(quality);
         let _ = imp.audio_format.set(audio_format);
@@ -545,6 +569,8 @@ impl AddDialog {
         self.set_exact_formats(media);
         imp.items_group.get().expect("built").set_visible(false);
         imp.transcribe.get().expect("built").set_visible(true);
+        imp.identify.get().expect("built").set_visible(true);
+        self.refresh_identify_row();
     }
 
     fn fill_collection(&self, playlist: &Playlist) {
@@ -594,6 +620,10 @@ impl AddDialog {
         let transcribe = imp.transcribe.get().expect("built");
         transcribe.set_active(false);
         transcribe.set_visible(false);
+        // And with no transcript there is nothing to attribute.
+        let identify = imp.identify.get().expect("built");
+        identify.set_active(false);
+        identify.set_visible(false);
 
         // A format id from item one means nothing for item two.
         self.clear_exact_formats();
@@ -669,8 +699,37 @@ impl AddDialog {
             ),
         );
 
+        imp.identify
+            .get()
+            .expect("built")
+            .set_active(settings.transcript.identifies_speakers());
+        self.refresh_identify_row();
         self.refresh_format_rows();
         self.refresh_destination();
+    }
+
+    /// Keep the speaker switch in step with what it depends on.
+    ///
+    /// Greyed rather than hidden, for the same reason as the Transcribe switch:
+    /// a control that vanishes between one download and the next is harder to
+    /// learn than one that is visibly unavailable and says why.
+    fn refresh_identify_row(&self) {
+        let imp = self.imp();
+        let Some(row) = imp.identify.get() else {
+            return;
+        };
+        let transcribing = imp
+            .transcribe
+            .get()
+            .is_some_and(|row| row.is_sensitive() && row.is_active());
+        let available = imp.diarizer_available.get();
+
+        row.set_sensitive(transcribing && available);
+        row.set_tooltip_text(match (transcribing, available) {
+            (_, false) => Some("Identifying speakers needs sherpa-onnx — see Preferences"),
+            (false, _) => Some("Turn on Transcribe first — there is nothing to mark up"),
+            _ => None,
+        });
     }
 
     fn refresh_format_rows(&self) {
@@ -803,6 +862,18 @@ impl AddDialog {
             let row = imp.transcribe.get().expect("built");
             (row.is_sensitive() && row.is_active() && collection.is_none())
                 .then(|| imp.settings.borrow().transcript.clone())
+                .map(|mut wish| {
+                    // The switch decides whether to identify speakers; how many
+                    // to look for stays a preference, because it is a detail
+                    // nobody wants to be asked about on every download.
+                    let row = imp.identify.get().expect("built");
+                    if !(row.is_sensitive() && row.is_active()) {
+                        wish.diarize = None;
+                    } else if wish.diarize.is_none() {
+                        wish.diarize = Some(Default::default());
+                    }
+                    wish
+                })
         };
 
         let (title, thumbnail) = match info {

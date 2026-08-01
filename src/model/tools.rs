@@ -22,6 +22,15 @@ pub enum Tool {
     Ffmpeg,
     Ffprobe,
     Whisper,
+    /// sherpa-onnx's diarizer, which works out who is speaking.
+    ///
+    /// A separate tool rather than a whisper flag because whisper has nothing
+    /// that does this. `--diarize` compares the loudness of two channels, which
+    /// says nothing about a mono download, and `--tinydiarize` marks the moments
+    /// the speaker changes without ever saying whether a voice is one already
+    /// heard — so it cannot answer "how many people are in this", which is the
+    /// question worth answering.
+    Diarizer,
     /// A JavaScript engine, which YouTube extraction now needs.
     ///
     /// This entry corrects an earlier mistake. The application Magpie replaces
@@ -57,6 +66,10 @@ impl Tool {
             Tool::Ffmpeg => &["ffmpeg"],
             Tool::Ffprobe => &["ffprobe"],
             Tool::Whisper => &["whisper-cli", "whisper-cpp"],
+            // One name, and a long one. There is no shorter alias and no
+            // distribution package, so anything found under this name is the
+            // tool and nothing else is.
+            Tool::Diarizer => &["sherpa-onnx-offline-speaker-diarization"],
             // Order is yt-dlp's own, from its EJS setup guide: deno is
             // recommended and the only one enabled by default, node and quickjs
             // work when named, and bun is deprecated — versions after 1.3.14 are
@@ -72,6 +85,7 @@ impl Tool {
             Tool::Ffmpeg => "FFmpeg",
             Tool::Ffprobe => "FFprobe",
             Tool::Whisper => "whisper.cpp",
+            Tool::Diarizer => "sherpa-onnx",
             Tool::JsRuntime => "JavaScript runtime",
         }
     }
@@ -83,6 +97,7 @@ impl Tool {
             Tool::Ffmpeg => "Needed to merge high quality video and to convert audio",
             Tool::Ffprobe => "Comes with FFmpeg. Used to measure audio before transcribing",
             Tool::Whisper => "Optional. Needed only for transcripts",
+            Tool::Diarizer => "Optional. Marks who is speaking in a transcript",
             Tool::JsRuntime => "YouTube needs one to reveal every format",
         }
     }
@@ -116,6 +131,10 @@ impl Tool {
             // couple of minutes, and a GUI button that silently starts a C++
             // build is a button whose failure nobody can read.
             Tool::Whisper => "./install.sh --with-whisper".into(),
+            // Unlike whisper this is not built here: upstream publishes a
+            // prebuilt Linux binary, so the script fetches and unpacks that
+            // rather than asking for a C++ toolchain and ten minutes.
+            Tool::Diarizer => "./install.sh --with-diarizer".into(),
             // Deno is what yt-dlp recommends and the only runtime it enables
             // without being told to. Ubuntu has no deno package, so a system
             // install means snap where there is one; otherwise deno's own
@@ -155,6 +174,7 @@ impl Tool {
         let command = self.install_command(installers);
         match self {
             Tool::Whisper => format!("Build it from Magpie's source tree — {command}"),
+            Tool::Diarizer => format!("Install it from Magpie's source tree — {command}"),
             // Deno named only when it is not already the command, so the line
             // does not recommend the thing it just told you to install.
             Tool::JsRuntime if !command.contains("deno") => {
@@ -183,6 +203,10 @@ impl Tool {
             // whisper.cpp has no --version; -h exits zero and prints a banner,
             // which is enough to prove the binary runs.
             Tool::Whisper => &["-h"],
+            // No version flag either. `--help` exits zero and prints its usage,
+            // which proves the binary and its shared libraries load — the thing
+            // most likely to be wrong about a downloaded tarball.
+            Tool::Diarizer => &["--help"],
             Tool::JsRuntime => &["--version"],
         }
     }
@@ -236,7 +260,21 @@ const HOME_INSTALL_DIRECTORIES: [(&str, &str); 2] = [("bun", ".bun/bin"), ("deno
 ///
 /// `/usr/lib/magpie` is the `.deb`'s, `/app/lib/magpie` the Flatpak's. Neither is
 /// on `PATH`, deliberately: these are Magpie's copies and nothing else's.
-const PRIVATE_DIRECTORIES: [&str; 2] = ["/usr/lib/magpie", "/app/lib/magpie"];
+///
+/// The `bin` variants are for a tool that arrives as a tree rather than as one
+/// file. sherpa-onnx's prebuilt binary is linked with `RPATH=$ORIGIN/../lib`, so
+/// it only resolves its own shared libraries when it sits in a `bin/` with a
+/// sibling `lib/`; flattening it into the directory above would produce a binary
+/// that is found and then fails to start.
+const PRIVATE_DIRECTORIES: [&str; 4] = [
+    "/usr/lib/magpie",
+    "/usr/lib/magpie/bin",
+    "/app/lib/magpie",
+    "/app/lib/magpie/bin",
+];
+
+/// The same, under the home directory, for `./install.sh` without root.
+const PRIVATE_HOME_DIRECTORIES: [&str; 2] = [".local/lib/magpie", ".local/lib/magpie/bin"];
 
 /// A tool that was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +329,7 @@ pub fn candidates(command: &str, path_var: &str, home: &Path) -> Vec<PathBuf> {
     // the user or the distribution installed later should win over our copy, and
     // because a private binary must never shadow a system one.
     directories.extend(PRIVATE_DIRECTORIES.iter().map(PathBuf::from));
+    directories.extend(PRIVATE_HOME_DIRECTORIES.iter().map(|dir| home.join(dir)));
 
     let mut seen = Vec::new();
     let mut paths = Vec::new();
@@ -393,8 +432,8 @@ pub fn parse_version(tool: Tool, stdout: &str) -> Option<String> {
             .nth(2)
             .map(|version| version.split('-').next().unwrap_or(version).to_string()),
         // The banner says nothing useful about a version, and inventing one
-        // would be worse than admitting it.
-        Tool::Whisper => None,
+        // would be worse than admitting it. Same for the diarizer's usage text.
+        Tool::Whisper | Tool::Diarizer => None,
         // `deno 2.5.3`, `v22.11.0`, `1.1.38` — whichever engine it is, the last
         // whitespace-separated word is the version, with node's `v` dropped.
         Tool::JsRuntime => first

@@ -18,6 +18,11 @@ rm -f "$DATA_DIR/metainfo/$APP_ID.metainfo.xml"
 rm -f "$DATA_DIR/icons/hicolor/scalable/apps/$APP_ID.svg"
 rm -f "$DATA_DIR/icons/hicolor/symbolic/apps/$APP_ID-symbolic.svg"
 rm -f "$DATA_DIR/dbus-1/services/$APP_ID.service"
+# whisper-cli, if --with-whisper installed it, and the sherpa-onnx tree, if
+# --with-diarizer did. Both are Magpie's own copies; a whisper.cpp the user
+# installed themselves is on PATH and not here, so this cannot remove it.
+rm -f "$PREFIX/bin/whisper-cli"
+rm -rf "$PREFIX/lib/magpie"
 
 if command -v update-desktop-database >/dev/null; then
   update-desktop-database -q "$DATA_DIR/applications" 2>/dev/null || true
@@ -26,7 +31,7 @@ fi
 echo
 say "Done. Your downloads were left alone, and so were:"
 say "  ~/.config/magpie          preferences"
-say "  ~/.local/share/magpie     the download list, and any whisper models"
+say "  ~/.local/share/magpie     the download list, and any speech or speaker models"
 say "  ~/.cache/magpie           thumbnails and scratch files"
 echo
 say "A whisper model is up to 1.5 GB, so it is worth checking before removing:"

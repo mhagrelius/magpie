@@ -132,6 +132,35 @@ modules:
         tag: v1.9.1
         commit: f049fff95a089aa9969deb009cdd4892b3e74916
 
+  # sherpa-onnx's diarizer, for identifying speakers. Fetched rather than built,
+  # unlike whisper.cpp above, because upstream publishes a prebuilt binary for
+  # every release — compiling it here would mean ONNX Runtime from source to
+  # arrive at the same file. Pinned by sha256, so an offline builder reproduces
+  # it and a changed asset fails the build rather than shipping quietly.
+  #
+  # `bin/` with a sibling `lib/`, not flattened into /app/lib/magpie: the binary
+  # is linked with RPATH=$ORIGIN/../lib and will not start from anywhere else.
+  # `model::tools::candidates` searches /app/lib/magpie/bin for exactly this.
+  - name: sherpa-onnx-diarizer
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 bin/sherpa-onnx-offline-speaker-diarization
+          /app/lib/magpie/bin/sherpa-onnx-offline-speaker-diarization
+      - install -d /app/lib/magpie/lib
+      - install -Dm644 -t /app/lib/magpie/lib lib/libonnxruntime.so*
+          lib/libsherpa-onnx-c-api.so lib/libsherpa-onnx-cxx-api.so
+    sources:
+      # The two architectures are not named to a pattern: x86-64's CPU build is
+      # `-shared`, arm64's is `-shared-cpu`.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-linux-x64-shared.tar.bz2
+        sha256: 18887dc13c7d313d0e0f6c164ed31715c27c1c2c4f71acd7c0147dc84cf02514
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-linux-aarch64-shared-cpu.tar.bz2
+        sha256: 36c5a3c942358ed635471488f50a28a96181331c935b0dce75a02b7f49913dc2
+
   - name: magpie
     buildsystem: simple
     build-options:

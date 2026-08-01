@@ -9,6 +9,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use super::load_stylesheet;
 use adw::prelude::*;
@@ -16,6 +17,7 @@ use adw::subclass::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
+use crate::model::diarize;
 use crate::model::failure::{self, Failure};
 use crate::model::job::{Job, Progress, State, TranscriptState};
 use crate::model::library::Library;
@@ -24,6 +26,7 @@ use crate::model::progress::{parse_line, Event};
 use crate::model::queue::Queue;
 use crate::model::request;
 use crate::model::settings::Settings;
+use crate::model::speakers;
 use crate::model::store::Outcome;
 use crate::model::transcript;
 use crate::APP_ID;
@@ -457,6 +460,7 @@ impl MagpieApplication {
             &self.imp().settings.borrow(),
             self.destination(),
             self.imp().report.borrow().has_whisper(),
+            self.imp().report.borrow().has_diarizer(),
         );
         dialog.connect_closure(
             "confirmed",
@@ -790,7 +794,7 @@ impl MagpieApplication {
         }
         let model_path = wish.model.path_in(&models_dir);
 
-        if transcript::needs_conversion(&media_path) {
+        if transcript::needs_conversion_for(&media_path, &wish) {
             let Some(ffmpeg) = imp.report.borrow().ffmpeg.clone().map(|found| found.path) else {
                 self.fail_transcript(id, "FFmpeg is needed to prepare the audio");
                 return;
@@ -858,6 +862,10 @@ impl MagpieApplication {
         let output = transcript::output_path(media_path, wish.format);
         let args = transcript::argv(model, audio, &stem, wish);
         let scratch_path = scratch.then(|| audio.to_path_buf());
+        // Both needed in the completion handler, which outlives this call.
+        let wish_after = wish.clone();
+        let media_after = media_path.to_path_buf();
+        let audio_after = audio.to_path_buf();
 
         self.set_transcript_state(id, TranscriptState::Running);
 
@@ -882,10 +890,29 @@ impl MagpieApplication {
                 #[weak(rename_to = app)]
                 self,
                 move |outcome| {
+                    app.imp().handles.borrow_mut().remove(&id);
+
+                    // The words exist and someone asked who said them. The
+                    // scratch wav is the diarizer's input too, so it is left in
+                    // place and that stage disposes of it.
+                    if matches!(outcome, process::Outcome::Success)
+                        && output.exists()
+                        && wish_after.identifies_speakers()
+                    {
+                        app.identify_speakers(
+                            id,
+                            &media_after,
+                            &audio_after,
+                            &output,
+                            &wish_after,
+                            scratch_path.clone(),
+                        );
+                        return;
+                    }
+
                     if let Some(scratch) = &scratch_path {
                         let _ = std::fs::remove_file(scratch);
                     }
-                    app.imp().handles.borrow_mut().remove(&id);
                     app.imp().progress.borrow_mut().remove(&id);
 
                     match outcome {
@@ -918,6 +945,217 @@ impl MagpieApplication {
             }
             Err(_) => self.fail_transcript(id, "whisper.cpp could not be started"),
         }
+    }
+
+    /// Work out who is speaking, now that there is a transcript to mark up.
+    ///
+    /// Every failure here lands on [`Self::finish_without_speakers`] rather than
+    /// on `fail_transcript`. The transcript is already written and already good;
+    /// losing it because the *second* tool could not load a model would be
+    /// throwing away the thing that took ten minutes to make over the thing that
+    /// takes ten seconds.
+    fn identify_speakers(
+        &self,
+        id: u64,
+        media_path: &Path,
+        audio: &Path,
+        output: &Path,
+        wish: &transcript::Wish,
+        scratch: Option<PathBuf>,
+    ) {
+        let imp = self.imp();
+        let Some(diarize_wish) = wish.diarize else {
+            self.finish_without_speakers(id, output, scratch, None);
+            return;
+        };
+        let Some(diarizer) = imp.report.borrow().diarizer.clone().map(|found| found.path) else {
+            self.finish_without_speakers(id, output, scratch, Some("sherpa-onnx is not installed"));
+            return;
+        };
+
+        let models_dir = toolbox::models_directory(&self.data_dir());
+        if !toolbox::diarize_models_on_disk(&models_dir) {
+            self.finish_without_speakers(
+                id,
+                output,
+                scratch,
+                Some("the speaker models have not been downloaded — see Preferences"),
+            );
+            return;
+        }
+
+        // The file whisper was asked for the timings in. For a subtitle
+        // transcript that is the user's own output, which is then rewritten in
+        // place with the names on it.
+        let timing_path = transcript::output_path(media_path, wish.timing_format());
+        let timing_scratch = wish.timing_file_is_scratch().then(|| timing_path.clone());
+
+        let args = diarize::argv(
+            &diarize::Asset::Segmentation.path_in(&models_dir),
+            &diarize::Asset::Embedding.path_in(&models_dir),
+            audio,
+            &diarize_wish,
+        );
+
+        self.set_transcript_state(id, TranscriptState::Identifying);
+        imp.progress
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .transcript_fraction = Some(0.0);
+
+        // Turns arrive one line at a time on stdout and are collected here
+        // rather than re-read from anywhere: this is the only copy.
+        let turns: Rc<RefCell<Vec<diarize::Turn>>> = Rc::new(RefCell::new(Vec::new()));
+        let collected = turns.clone();
+
+        let format = wish.format;
+        // One copy for the completion handler and one for the failure path here,
+        // which runs only when the process never started.
+        let failed_to_start = output.to_path_buf();
+        let output = output.to_path_buf();
+
+        let handle = process::run(
+            &diarizer,
+            &args,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |_, line| {
+                    if let Some(turn) = diarize::parse_turn(line) {
+                        collected.borrow_mut().push(turn);
+                        return;
+                    }
+                    if let Some(fraction) = diarize::parse_progress(line) {
+                        let mut progress = app.imp().progress.borrow_mut();
+                        progress.entry(id).or_default().transcript_fraction = Some(fraction);
+                        drop(progress);
+                        app.touch();
+                    }
+                }
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |outcome| {
+                    if let Some(scratch) = &scratch {
+                        let _ = std::fs::remove_file(scratch);
+                    }
+                    app.imp().handles.borrow_mut().remove(&id);
+                    app.imp().progress.borrow_mut().remove(&id);
+
+                    let turns = turns.borrow();
+                    match outcome {
+                        process::Outcome::Success if !turns.is_empty() => {
+                            let summary = app.write_speakers(&timing_path, &output, &turns, format);
+                            // The timing file only gets deleted once the labelled
+                            // output is safely written, and never when it *is*
+                            // the output.
+                            if let (Some(scratch), true) = (&timing_scratch, summary.is_some()) {
+                                if scratch != &output {
+                                    let _ = std::fs::remove_file(scratch);
+                                }
+                            }
+                            match summary {
+                                Some(summary) => {
+                                    if let Some(job) = app.imp().queue.borrow_mut().get_mut(id) {
+                                        job.speakers = Some(summary);
+                                    }
+                                    app.set_transcript_state(
+                                        id,
+                                        TranscriptState::Done(output.clone()),
+                                    );
+                                    app.persist();
+                                }
+                                None => app.finish_without_speakers(
+                                    id,
+                                    &output,
+                                    None,
+                                    Some("the transcript could not be marked up"),
+                                ),
+                            }
+                        }
+                        // Exited zero having found nothing. Silence, or audio the
+                        // segmentation model heard no speech in.
+                        process::Outcome::Success => app.finish_without_speakers(
+                            id,
+                            &output,
+                            None,
+                            Some("no speech was found to attribute"),
+                        ),
+                        process::Outcome::Cancelled => {
+                            app.set_transcript_state(id, TranscriptState::None)
+                        }
+                        process::Outcome::Failed { .. } => app.finish_without_speakers(
+                            id,
+                            &output,
+                            None,
+                            Some("the speakers could not be identified"),
+                        ),
+                    }
+                }
+            ),
+        );
+
+        match handle {
+            Ok(handle) => {
+                self.imp().handles.borrow_mut().insert(id, handle);
+            }
+            Err(_) => self.finish_without_speakers(
+                id,
+                &failed_to_start,
+                None,
+                Some("sherpa-onnx could not be started"),
+            ),
+        }
+    }
+
+    /// Read the timings, attach the voices, and write the transcript back out.
+    ///
+    /// Returns the sentence describing what was found, or `None` if there was
+    /// nothing to work with — in which case the plain transcript stays as it is.
+    fn write_speakers(
+        &self,
+        timing_path: &Path,
+        output: &Path,
+        turns: &[diarize::Turn],
+        format: transcript::Format,
+    ) -> Option<String> {
+        let source = std::fs::read_to_string(timing_path).ok()?;
+        let cues = speakers::parse_cues(&source);
+        if cues.is_empty() {
+            return None;
+        }
+
+        let lines = speakers::align(cues, turns);
+        let cast = speakers::cast(&lines);
+        if cast.is_empty() {
+            return None;
+        }
+
+        let rendered = speakers::render(&lines, &cast, format);
+        std::fs::write(output, rendered).ok()?;
+        Some(speakers::summary(&cast))
+    }
+
+    /// Keep the transcript, say why it has no names on it.
+    fn finish_without_speakers(
+        &self,
+        id: u64,
+        output: &Path,
+        scratch: Option<PathBuf>,
+        reason: Option<&str>,
+    ) {
+        if let Some(scratch) = &scratch {
+            let _ = std::fs::remove_file(scratch);
+        }
+        self.imp().progress.borrow_mut().remove(&id);
+        self.set_transcript_state(id, TranscriptState::Done(output.to_path_buf()));
+        if let Some(reason) = reason {
+            self.window()
+                .toast(&format!("Transcript ready, but no speakers — {reason}"));
+        }
+        self.persist();
     }
 
     fn set_transcript_state(&self, id: u64, state: TranscriptState) {

@@ -14,6 +14,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use soup::prelude::*;
 
+use crate::model::diarize::Asset;
 use crate::model::tools::{self, Found, Freshness, Installers, Tool};
 use crate::model::transcript::Model;
 
@@ -34,6 +35,8 @@ pub struct Report {
     pub pipx_path: Option<PathBuf>,
     /// A JavaScript engine for yt-dlp's YouTube extractor, if there is one.
     pub js_runtime: Option<Found>,
+    /// sherpa-onnx's diarizer, for marking who is speaking.
+    pub diarizer: Option<Found>,
 }
 
 impl Report {
@@ -44,6 +47,7 @@ impl Report {
             Tool::Ffprobe => self.ffprobe.as_ref(),
             Tool::Whisper => self.whisper.as_ref(),
             Tool::JsRuntime => self.js_runtime.as_ref(),
+            Tool::Diarizer => self.diarizer.as_ref(),
         }
     }
 
@@ -57,6 +61,15 @@ impl Report {
 
     pub fn has_whisper(&self) -> bool {
         self.whisper.is_some()
+    }
+
+    /// Whether identifying speakers can be offered at all.
+    ///
+    /// The tool alone, not the models: the models are a download Magpie can
+    /// start from preferences, whereas a missing binary is a install the user
+    /// has to do. Those are different sentences and the UI says the right one.
+    pub fn has_diarizer(&self) -> bool {
+        self.diarizer.is_some()
     }
 
     /// The banner to show at the top of the window, if any.
@@ -119,6 +132,7 @@ pub fn survey<F: Fn(Report) + 'static>(ytdlp_override: Option<PathBuf>, on_ready
         (Tool::Ffprobe, locate(Tool::Ffprobe)),
         (Tool::Whisper, locate(Tool::Whisper)),
         (Tool::JsRuntime, locate(Tool::JsRuntime)),
+        (Tool::Diarizer, locate(Tool::Diarizer)),
     ];
 
     // The installers themselves, so the advice can name one the user already
@@ -164,6 +178,7 @@ pub fn survey<F: Fn(Report) + 'static>(ytdlp_override: Option<PathBuf>, on_ready
                 Tool::Ffprobe => report.ffprobe = Some(found),
                 Tool::Whisper => report.whisper = Some(found),
                 Tool::JsRuntime => report.js_runtime = Some(found),
+                Tool::Diarizer => report.diarizer = Some(found),
             }
         }
         on_ready(report);
@@ -258,14 +273,114 @@ pub fn model_on_disk(models_dir: &Path, model: Model) -> Option<u64> {
     (metadata.len() > model.bytes() / 2).then_some(metadata.len())
 }
 
+/// Whether one of the diarization models is on disk and plausibly whole.
+pub fn diarize_asset_on_disk(models_dir: &Path, asset: Asset) -> Option<u64> {
+    let metadata = std::fs::metadata(asset.path_in(models_dir)).ok()?;
+    (metadata.len() > asset.bytes() / 2).then_some(metadata.len())
+}
+
+/// Whether *both* models are there, which is what running needs.
+pub fn diarize_models_on_disk(models_dir: &Path) -> bool {
+    Asset::ALL
+        .iter()
+        .all(|asset| diarize_asset_on_disk(models_dir, *asset).is_some())
+}
+
+/// Fetch both diarization models as one action.
+///
+/// One action because they are useless apart — a user who has the segmentation
+/// model and not the embedding one has nothing, and asking them to think about
+/// two downloads would be exposing an implementation detail as a decision. The
+/// progress fraction spans the pair, weighted by size, so the bar does not jump
+/// back to zero in the middle.
+pub fn download_diarize_models<P, D>(models_dir: &Path, on_progress: P, on_done: D) -> ModelDownload
+where
+    P: Fn(f64) + 'static,
+    D: FnOnce(Result<(), String>) + 'static,
+{
+    let total = crate::model::diarize::total_bytes() as f64;
+    let first = Asset::ALL[0];
+    let second = Asset::ALL[1];
+    let first_share = first.bytes() as f64 / total;
+
+    let on_progress = Rc::new(on_progress);
+    let on_done = Rc::new(RefCell::new(Some(on_done)));
+
+    // The second download replaces the handle inside this cell, so cancelling
+    // partway through cancels whichever is actually running.
+    let inner: Rc<RefCell<Option<ModelDownload>>> = Rc::new(RefCell::new(None));
+    let cancellable = gio::Cancellable::new();
+
+    let models_dir = models_dir.to_path_buf();
+    let started = download_file(
+        first.download_url(),
+        first.path_in(&models_dir),
+        first.bytes(),
+        {
+            let on_progress = on_progress.clone();
+            move |fraction| on_progress(fraction * first_share)
+        },
+        {
+            let inner = inner.clone();
+            let on_progress = on_progress.clone();
+            let on_done = on_done.clone();
+            let cancellable = cancellable.clone();
+            move |result| {
+                let finish = move |result: Result<(), String>| {
+                    if let Some(on_done) = on_done.borrow_mut().take() {
+                        on_done(result);
+                    }
+                };
+                if let Err(error) = result {
+                    finish(Err(error));
+                    return;
+                }
+                if cancellable.is_cancelled() {
+                    finish(Err("cancelled".into()));
+                    return;
+                }
+
+                let next = download_file(
+                    second.download_url(),
+                    second.path_in(&models_dir),
+                    second.bytes(),
+                    move |fraction| on_progress(first_share + fraction * (1.0 - first_share)),
+                    move |result| finish(result.map(|_| ())),
+                );
+                inner.replace(Some(next));
+            }
+        },
+    );
+    inner.replace(Some(started));
+
+    ModelDownload {
+        cancellable,
+        running: Some(inner),
+    }
+}
+
 /// A download in progress, cancellable.
 pub struct ModelDownload {
     cancellable: gio::Cancellable,
+    /// The download actually running, when this handle stands for a sequence of
+    /// them. Cancelling has to reach whichever one that currently is, or pressing
+    /// Cancel during the second of two files would only set a flag nobody reads.
+    running: Option<Rc<RefCell<Option<ModelDownload>>>>,
 }
 
 impl ModelDownload {
     pub fn cancel(&self) {
         self.cancellable.cancel();
+        if let Some(running) = &self.running {
+            // `try_borrow` because cancelling from inside the callback that is
+            // mid-way through replacing this cell would otherwise panic, and a
+            // download that is already finishing needs no cancelling.
+            if let Ok(running) = running.try_borrow() {
+                if let Some(running) = running.as_ref() {
+                    running.cancel();
+                }
+            }
+        }
     }
 }
 
@@ -286,13 +401,47 @@ where
     P: Fn(f64) + 'static,
     D: FnOnce(Result<PathBuf, String>) + 'static,
 {
+    download_file(
+        model.download_url(),
+        model.path_in(models_dir),
+        model.bytes(),
+        on_progress,
+        on_done,
+    )
+}
+
+/// Fetch one file to a path, reporting progress.
+///
+/// `expected` is only a fallback for the progress bar when the server sends no
+/// content length; the file is whatever the server actually returns.
+fn download_file<P, D>(
+    url: impl Into<String>,
+    final_path: PathBuf,
+    expected: u64,
+    on_progress: P,
+    on_done: D,
+) -> ModelDownload
+where
+    P: Fn(f64) + 'static,
+    D: FnOnce(Result<PathBuf, String>) + 'static,
+{
     let cancellable = gio::Cancellable::new();
     let download = ModelDownload {
         cancellable: cancellable.clone(),
+        running: None,
     };
 
-    let final_path = model.path_in(models_dir);
-    let part_path = final_path.with_extension("bin.part");
+    let url = url.into();
+    // `.part` appended rather than substituted: `set_extension` on
+    // `diarize-segmentation.onnx` would replace `.onnx` and leave the finished
+    // name unreachable.
+    let part_path = final_path.with_file_name(format!(
+        "{}.part",
+        final_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "download".to_string())
+    ));
     let session = soup::Session::new();
 
     let on_done = Rc::new(RefCell::new(Some(on_done)));
@@ -310,7 +459,7 @@ where
             }
         }
 
-        let Ok(message) = soup::Message::new("GET", &model.download_url()) else {
+        let Ok(message) = soup::Message::new("GET", &url) else {
             finish(Err("the model address is not a URL".into()));
             return;
         };
@@ -337,7 +486,7 @@ where
             // Hugging Face redirects to a CDN that does send a length, but
             // falling back on the published size keeps the bar honest if it ever
             // stops.
-            .unwrap_or_else(|| model.bytes());
+            .unwrap_or(expected);
 
         let file = gio::File::for_path(&part_path);
         let output = match file

@@ -53,6 +53,12 @@ pub enum TranscriptState {
     /// Converting to 16 kHz mono, before whisper sees it.
     Converting,
     Running,
+    /// The words exist; working out who said them.
+    ///
+    /// A state of its own rather than more `Running`, because it is a second
+    /// program with its own progress and its own way of failing, and because
+    /// "transcribing 100%" sitting still for a minute is the bug this avoids.
+    Identifying,
     Done(PathBuf),
     Failed(String),
 }
@@ -106,6 +112,14 @@ pub struct Job {
     /// The file yt-dlp produced. Several, for a collection.
     #[serde(default)]
     pub outputs: Vec<PathBuf>,
+    /// What the speaker pass found, once it has run — "3 speakers · Alice,
+    /// Speaker 2, Speaker 3".
+    ///
+    /// Kept on the job rather than recomputed, because the answer lives in a file
+    /// Magpie has already finished writing and re-reading it to redraw a row
+    /// would be reading a transcript off disk sixty times a second.
+    #[serde(default)]
+    pub speakers: Option<String>,
     pub added: DateTime<Utc>,
 }
 
@@ -123,6 +137,7 @@ impl Job {
             state: State::Waiting,
             transcript_state: TranscriptState::None,
             outputs: Vec::new(),
+            speakers: None,
             added: Utc::now(),
         }
     }
@@ -254,7 +269,19 @@ impl Job {
                     .unwrap_or_default();
                 format!("{saved} · transcribing{percent}")
             }
-            TranscriptState::Done(_) => format!("{saved} · transcript ready"),
+            TranscriptState::Identifying => {
+                let percent = progress
+                    .and_then(|p| p.transcript_fraction)
+                    .map(|f| format!(" {}%", (f * 100.0).round()))
+                    .unwrap_or_default();
+                format!("{saved} · identifying speakers{percent}")
+            }
+            // The count is the answer the user asked for, so it belongs on the
+            // row rather than in a toast they may have missed.
+            TranscriptState::Done(_) => match &self.speakers {
+                Some(speakers) => format!("{saved} · {speakers}"),
+                None => format!("{saved} · transcript ready"),
+            },
             TranscriptState::Failed(_) => format!("{saved} · transcript failed"),
         }
     }
@@ -264,7 +291,9 @@ impl Job {
     pub fn fraction(&self, progress: Option<&Progress>) -> Option<f64> {
         match self.state {
             State::Done => match self.transcript_state {
-                TranscriptState::Running => progress.and_then(|p| p.transcript_fraction),
+                TranscriptState::Running | TranscriptState::Identifying => {
+                    progress.and_then(|p| p.transcript_fraction)
+                }
                 TranscriptState::Converting => None,
                 _ => Some(1.0),
             },
@@ -284,7 +313,9 @@ impl Job {
         self.state.is_active()
             || matches!(
                 self.transcript_state,
-                TranscriptState::Converting | TranscriptState::Running
+                TranscriptState::Converting
+                    | TranscriptState::Running
+                    | TranscriptState::Identifying
             )
     }
 }
