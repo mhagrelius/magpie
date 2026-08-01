@@ -22,6 +22,25 @@ pub enum Tool {
     Ffmpeg,
     Ffprobe,
     Whisper,
+    /// A JavaScript engine, which YouTube extraction now needs.
+    ///
+    /// This entry corrects an earlier mistake. The application Magpie replaces
+    /// downloaded and managed a Deno runtime, and the first cut of this file
+    /// dismissed that as pointless on the grounds that yt-dlp finds a runtime by
+    /// itself. It does — but when there is none it prints "YouTube extraction
+    /// without a JS runtime has been deprecated, and some formats may be missing"
+    /// to stderr and carries on.
+    ///
+    /// Measured, not assumed: on the videos this was tested against the format
+    /// list was *identical* with and without a runtime, so the lost formats are
+    /// documented by yt-dlp rather than observed here. What naming a runtime
+    /// definitely does is silence a deprecation warning and remove the risk. That
+    /// is worth one argument, and it is not worth a banner — see
+    /// `ui::toolbox::Report::banner`.
+    ///
+    /// Magpie detects a runtime and tells yt-dlp where it is. It does not install
+    /// one, which is the part the old application got wrong.
+    JsRuntime,
 }
 
 impl Tool {
@@ -38,6 +57,11 @@ impl Tool {
             Tool::Ffmpeg => &["ffmpeg"],
             Tool::Ffprobe => &["ffprobe"],
             Tool::Whisper => &["whisper-cli", "whisper-cpp"],
+            // Deno first because it is the only one yt-dlp enables by default;
+            // the others work but have to be pointed at explicitly. Order is
+            // preference, so a machine with all three gets the one needing no
+            // extra argument.
+            Tool::JsRuntime => &["deno", "node", "bun"],
         }
     }
 
@@ -47,6 +71,7 @@ impl Tool {
             Tool::Ffmpeg => "FFmpeg",
             Tool::Ffprobe => "FFprobe",
             Tool::Whisper => "whisper.cpp",
+            Tool::JsRuntime => "JavaScript runtime",
         }
     }
 
@@ -57,6 +82,10 @@ impl Tool {
             Tool::Ffmpeg => "Needed to merge high quality video and to convert audio",
             Tool::Ffprobe => "Comes with FFmpeg. Used to measure audio before transcribing",
             Tool::Whisper => "Optional. Needed only for transcripts",
+            Tool::JsRuntime => {
+                "YouTube needs one to reach every format. Without it, the higher \
+                 qualities may be missing"
+            }
         }
     }
 
@@ -83,6 +112,10 @@ impl Tool {
             // couple of minutes, and a GUI button that silently starts a C++
             // build is a button whose failure nobody can read.
             Tool::Whisper => "./install.sh --with-whisper".into(),
+            // Not in Ubuntu's archive, and not something to fetch with a shell
+            // pipeline on the user's behalf. Node is the one most machines
+            // already have, so it is named first.
+            Tool::JsRuntime => "sudo apt install nodejs — or deno.land".into(),
         }
     }
 
@@ -128,6 +161,7 @@ impl Tool {
             // whisper.cpp has no --version; -h exits zero and prints a banner,
             // which is enough to prove the binary runs.
             Tool::Whisper => &["-h"],
+            Tool::JsRuntime => &["--version"],
         }
     }
 }
@@ -167,6 +201,11 @@ impl Installers {
     }
 }
 
+/// Tools whose own installer uses a private directory and edits the shell profile
+/// to reach it. A desktop launcher reads no shell profile, so these are searched
+/// directly.
+const HOME_INSTALL_DIRECTORIES: [(&str, &str); 2] = [("bun", ".bun/bin"), ("deno", ".deno/bin")];
+
 /// Where a Magpie package puts a tool it had to bundle.
 ///
 /// `/usr/lib/magpie` is the `.deb`'s, `/app/lib/magpie` the Flatpak's. Neither is
@@ -194,7 +233,7 @@ pub struct Found {
 /// shims, so it covers the ordinary case on its own. The venv directories below
 /// it are for the user who pointed `UV_TOOL_BIN_DIR` somewhere off `PATH`.
 pub fn candidates(command: &str, path_var: &str, home: &Path) -> Vec<PathBuf> {
-    let preferred = [
+    let mut preferred = vec![
         home.join(".local/bin"),
         home.join(".local/share/uv/tools").join(command).join("bin"),
         home.join(".local/share/pipx/venvs")
@@ -202,7 +241,18 @@ pub fn candidates(command: &str, path_var: &str, home: &Path) -> Vec<PathBuf> {
             .join("bin"),
     ];
 
-    let mut directories: Vec<PathBuf> = preferred.into_iter().collect();
+    // A few tools install to a directory of their own that their own installer
+    // adds to the shell's PATH — which a desktop launcher does not inherit. Left
+    // out, a `bun` sitting exactly where bun.sh puts it is invisible to Magpie
+    // when launched from the applications grid and visible when launched from a
+    // terminal, which is a difference nobody could diagnose.
+    for (name, directory) in HOME_INSTALL_DIRECTORIES {
+        if command == name {
+            preferred.push(home.join(directory));
+        }
+    }
+
+    let mut directories: Vec<PathBuf> = preferred;
     directories.extend(
         path_var
             .split(':')
@@ -319,6 +369,12 @@ pub fn parse_version(tool: Tool, stdout: &str) -> Option<String> {
         // The banner says nothing useful about a version, and inventing one
         // would be worse than admitting it.
         Tool::Whisper => None,
+        // `deno 2.5.3`, `v22.11.0`, `1.1.38` — whichever engine it is, the last
+        // whitespace-separated word is the version, with node's `v` dropped.
+        Tool::JsRuntime => first
+            .split_whitespace()
+            .next_back()
+            .map(|version| version.trim_start_matches('v').to_string()),
     }
 }
 
@@ -343,6 +399,26 @@ mod tests {
         assert!(paths.contains(&PathBuf::from(
             "/home/matty/.local/share/uv/tools/yt-dlp/bin/yt-dlp"
         )));
+    }
+
+    #[test]
+    fn an_engine_in_its_own_installers_directory_is_found() {
+        // bun.sh installs to ~/.bun/bin and puts that on PATH by editing the
+        // shell profile. A desktop launcher reads no profile, so without this the
+        // same machine finds bun from a terminal and not from the app grid.
+        let home = Path::new("/home/matty");
+        let bun = candidates("bun", "/usr/bin", home);
+        assert!(
+            bun.contains(&PathBuf::from("/home/matty/.bun/bin/bun")),
+            "{bun:?}"
+        );
+
+        let deno = candidates("deno", "/usr/bin", home);
+        assert!(deno.contains(&PathBuf::from("/home/matty/.deno/bin/deno")));
+
+        // And the private directory is not offered to unrelated commands.
+        let ytdlp = candidates("yt-dlp", "/usr/bin", home);
+        assert!(!ytdlp.iter().any(|p| p.to_string_lossy().contains(".bun")));
     }
 
     #[test]

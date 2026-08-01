@@ -57,6 +57,16 @@ else
   git clone --depth 1 --branch "$WHISPER_VERSION" --quiet "$WHISPER_REPO" "$SRC"
 fi
 
+# A CMake cache records the absolute path it was configured in, and cmake refuses
+# to run when that no longer matches — so moving or renaming the checkout fails
+# the build with a message about CMakeCache.txt that is not the user's problem to
+# solve. Discard the cache rather than asking them to.
+if [[ -f "$SRC/build/CMakeCache.txt" ]] &&
+  ! grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$SRC" "$SRC/build/CMakeCache.txt"; then
+  say "Discarding a build cache configured under a different path"
+  rm -rf "$SRC/build"
+fi
+
 say "Building whisper-cli (CPU, portable)"
 cmake -S "$SRC" -B "$SRC/build" \
   -DCMAKE_BUILD_TYPE=Release \

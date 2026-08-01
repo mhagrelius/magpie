@@ -98,7 +98,7 @@ fn a_pasted_link_becomes_a_download_that_can_reach_1080p() {
     job.selection = Selection::Video(Quality::UpTo1080);
     job.thumbnail = video.thumbnail.clone();
 
-    let request = job.request(Cookies::None, None, &cache());
+    let request = job.request(Cookies::None, None, None, &cache());
     let args = request.argv();
 
     let selector = value_after(&args, "-f").expect("a format selector");
@@ -238,7 +238,7 @@ fn a_playlist_downloads_the_ticked_items_into_a_folder_of_its_own() {
         items: chosen,
     });
 
-    let args = job.request(Cookies::None, None, &cache()).argv();
+    let args = job.request(Cookies::None, None, None, &cache()).argv();
     assert_eq!(value_after(&args, "--playlist-items"), Some("2,4"));
     assert_eq!(
         value_after(&args, "-P"),
@@ -303,7 +303,7 @@ fn a_bot_wall_names_the_setting_that_fixes_it_and_offers_no_pointless_retry() {
     let mut settings = settings();
     settings.cookies_from_browser = Some("firefox".into());
     let job = Job::new(1, "https://youtu.be/abc".into(), "x".into(), destination());
-    let args = job.request(settings.cookies(), None, &cache()).argv();
+    let args = job.request(settings.cookies(), None, None, &cache()).argv();
     assert_eq!(
         value_after(&args, "--cookies-from-browser"),
         Some("firefox")
@@ -315,11 +315,11 @@ fn an_audio_only_download_needs_no_ffmpeg_unless_it_was_asked_to_convert() {
     let mut job = Job::new(1, "https://youtu.be/x".into(), "x".into(), destination());
 
     job.selection = Selection::Audio(AudioFormat::Best);
-    let args = job.request(Cookies::None, None, &cache()).argv();
+    let args = job.request(Cookies::None, None, None, &cache()).argv();
     assert!(!args.contains(&"-x".to_string()), "a copy, not a transcode");
 
     job.selection = Selection::Audio(AudioFormat::Mp3);
-    let args = job.request(Cookies::None, None, &cache()).argv();
+    let args = job.request(Cookies::None, None, None, &cache()).argv();
     assert!(args.contains(&"-x".to_string()));
     assert_eq!(value_after(&args, "--audio-format"), Some("mp3"));
     // The setting the old application declared, stored, and never passed.

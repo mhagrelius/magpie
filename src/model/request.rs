@@ -70,6 +70,9 @@ pub struct Request {
     pub cookies: Cookies,
     /// A yt-dlp rate string such as `2M`, or none for unlimited.
     pub rate_limit: Option<String>,
+    /// A JavaScript engine for YouTube's signature challenges, if one was found.
+    /// See `model::tools::Tool::JsRuntime`.
+    pub js_runtime: Option<PathBuf>,
     /// File that `--print-to-file after_move:filepath` writes the finished
     /// paths into, one per line.
     pub filepath_sink: PathBuf,
@@ -144,8 +147,25 @@ impl Request {
             flags(&mut args, &["--limit-rate", rate]);
         }
 
+        if let Some(argument) = self.js_runtime_argument() {
+            flags(&mut args, &["--js-runtimes", &argument]);
+        }
+
         args.push(self.url.clone());
         args
+    }
+
+    /// `name:/absolute/path` for the runtime that was found.
+    ///
+    /// The path is given, not just the name, for two reasons. yt-dlp enables only
+    /// `deno` by default, so node and bun have to be named to be used at all; and
+    /// a runtime installed by a version manager — fnm, nvm, asdf — lives on a
+    /// `PATH` that exists in the user's shell and not in the environment a desktop
+    /// launcher hands the application. Naming the file settles both.
+    fn js_runtime_argument(&self) -> Option<String> {
+        let path = self.js_runtime.as_ref()?;
+        let name = path.file_name()?.to_str()?;
+        Some(format!("{name}:{}", path.display()))
     }
 
     /// The filename template, which differs for a collection because the order
@@ -262,6 +282,7 @@ mod tests {
             collection: None,
             cookies: Cookies::None,
             rate_limit: None,
+            js_runtime: None,
             filepath_sink: PathBuf::from("/home/matty/.cache/magpie/job-1.paths"),
         }
     }
@@ -365,6 +386,37 @@ mod tests {
             Some("firefox")
         );
         assert_eq!(value_after(&args, "--limit-rate"), Some("2M"));
+    }
+
+    #[test]
+    fn a_javascript_runtime_is_named_with_its_full_path() {
+        // yt-dlp enables only `deno` by default, so node and bun must be named or
+        // they are not used at all — and a runtime installed by fnm, nvm or asdf
+        // sits on a PATH the user's shell has and a desktop launcher does not.
+        // Naming the file settles both. Without it yt-dlp warns that extraction
+        // is deprecated and "some formats may be missing" — a risk yt-dlp
+        // documents, not one observed here; see `tools::Tool::JsRuntime`.
+        let mut req = request();
+        assert_eq!(
+            value_after(&req.argv(), "--js-runtimes"),
+            None,
+            "nothing claimed when nothing was found"
+        );
+
+        req.js_runtime = Some(PathBuf::from(
+            "/run/user/1000/fnm_multishells/744991_1785587718332/bin/node",
+        ));
+        assert_eq!(
+            value_after(&req.argv(), "--js-runtimes"),
+            Some("node:/run/user/1000/fnm_multishells/744991_1785587718332/bin/node")
+        );
+
+        req.js_runtime = Some(PathBuf::from("/usr/bin/deno"));
+        assert_eq!(
+            value_after(&req.argv(), "--js-runtimes"),
+            Some("deno:/usr/bin/deno"),
+            "named even though it is the default, so a deno off PATH still works"
+        );
     }
 
     #[test]

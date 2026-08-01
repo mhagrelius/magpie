@@ -133,6 +133,7 @@ impl Job {
         &self,
         cookies: Cookies,
         rate_limit: Option<String>,
+        js_runtime: Option<PathBuf>,
         cache_dir: &std::path::Path,
     ) -> Request {
         Request {
@@ -142,6 +143,7 @@ impl Job {
             collection: self.collection.clone(),
             cookies,
             rate_limit,
+            js_runtime,
             filepath_sink: super::request::sink_path(cache_dir, self.id),
         }
     }

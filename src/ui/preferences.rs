@@ -523,7 +523,13 @@ impl Preferences {
         group.set_header_suffix(Some(&rescan));
 
         let mut rows = Vec::new();
-        for tool in [Tool::YtDlp, Tool::Ffmpeg, Tool::Ffprobe, Tool::Whisper] {
+        for tool in [
+            Tool::YtDlp,
+            Tool::JsRuntime,
+            Tool::Ffmpeg,
+            Tool::Ffprobe,
+            Tool::Whisper,
+        ] {
             let row = adw::ActionRow::builder().title(tool.label()).build();
 
             // Copy is always available, because the command is useful whether or

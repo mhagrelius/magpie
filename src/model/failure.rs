@@ -89,7 +89,7 @@ impl Failure {
                  Check its version on the Tools page in Preferences."
             }
             Failure::FormatUnavailable => {
-                "Try “Best available” instead, or pick a specific format from the list."
+                "Try “Best available” instead, or pick a specific format from the list.                  If the quality you wanted is not offered at all, check that a                  JavaScript engine is listed on the Tools page — YouTube needs one to                  reveal every format."
             }
             Failure::FfmpegMissing => {
                 "Merging high quality video and converting audio both need FFmpeg. \

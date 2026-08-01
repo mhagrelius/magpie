@@ -32,6 +32,8 @@ pub struct Report {
     pub installers: Installers,
     pub uv_path: Option<PathBuf>,
     pub pipx_path: Option<PathBuf>,
+    /// A JavaScript engine for yt-dlp's YouTube extractor, if there is one.
+    pub js_runtime: Option<Found>,
 }
 
 impl Report {
@@ -41,6 +43,7 @@ impl Report {
             Tool::Ffmpeg => self.ffmpeg.as_ref(),
             Tool::Ffprobe => self.ffprobe.as_ref(),
             Tool::Whisper => self.whisper.as_ref(),
+            Tool::JsRuntime => self.js_runtime.as_ref(),
         }
     }
 
@@ -76,6 +79,14 @@ impl Report {
                 ),
                 "Details",
             )),
+            // A missing JavaScript engine deliberately does *not* earn a banner.
+            // yt-dlp calls extraction without one deprecated and warns that "some
+            // formats may be missing", but on the videos this was tested against
+            // the format list was identical with and without one — so the harm is
+            // documented rather than observed, and a persistent banner for a
+            // maybe is the kind of nagging that teaches people to ignore banners.
+            // It appears on the Tools page, and the two failures it could plausibly
+            // cause name it in their guidance.
             _ => None,
         }
     }
@@ -107,6 +118,7 @@ pub fn survey<F: Fn(Report) + 'static>(ytdlp_override: Option<PathBuf>, on_ready
         (Tool::Ffmpeg, locate(Tool::Ffmpeg)),
         (Tool::Ffprobe, locate(Tool::Ffprobe)),
         (Tool::Whisper, locate(Tool::Whisper)),
+        (Tool::JsRuntime, locate(Tool::JsRuntime)),
     ];
 
     // The installers themselves, so the advice can name one the user already
@@ -147,6 +159,7 @@ pub fn survey<F: Fn(Report) + 'static>(ytdlp_override: Option<PathBuf>, on_ready
                 Tool::Ffmpeg => report.ffmpeg = Some(found),
                 Tool::Ffprobe => report.ffprobe = Some(found),
                 Tool::Whisper => report.whisper = Some(found),
+                Tool::JsRuntime => report.js_runtime = Some(found),
             }
         }
         on_ready(report);

@@ -622,11 +622,21 @@ impl MagpieApplication {
         let settings = imp.settings.borrow().clone();
         let cache_dir = self.cache_dir();
 
-        let Some(request) =
-            imp.queue.borrow().get(id).map(|job| {
-                job.request(settings.cookies(), settings.rate_limit.clone(), &cache_dir)
-            })
-        else {
+        let js_runtime = imp
+            .report
+            .borrow()
+            .js_runtime
+            .as_ref()
+            .map(|found| found.path.clone());
+
+        let Some(request) = imp.queue.borrow().get(id).map(|job| {
+            job.request(
+                settings.cookies(),
+                settings.rate_limit.clone(),
+                js_runtime,
+                &cache_dir,
+            )
+        }) else {
             return;
         };
 

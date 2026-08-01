@@ -448,6 +448,9 @@ fn report() -> ToolReport {
         },
         uv_path: Some(PathBuf::from("/home/matty/.local/bin/uv")),
         pipx_path: None,
+        // Absent, which is the state worth looking at: it is the one degradation
+        // that costs formats without saying so.
+        js_runtime: None,
     }
 }
 

@@ -374,8 +374,30 @@ not to this document.
   A bundled copy goes in `/usr/lib/magpie` or `/app/lib/magpie`, never on `PATH`,
   and `model::tools::candidates` searches those **last** — so a whisper.cpp the
   user or the distribution installs later always wins over ours.
-- **No Deno management.** yt-dlp finds a JavaScript runtime on `PATH` by itself.
-  Magpie does not put one there, and does not rewrite `PATH` for the child.
+- **No Deno management, but the runtime is not ignored either.** This started as
+  a flat dismissal — "yt-dlp finds a JavaScript runtime itself" — which is true and
+  was the wrong conclusion. Run a current yt-dlp against YouTube with no engine
+  installed and it says:
+
+      YouTube extraction without a JS runtime has been deprecated, and some
+      formats may be missing
+
+  Silently offering fewer formats is the failure this rewrite exists to prevent,
+  so ignoring that warning would have reintroduced it by the back door.
+
+  Magpie therefore *detects* an engine — `deno`, `node` or `bun`, in that order —
+  and passes `--js-runtimes <name>:<absolute path>`. The absolute path matters
+  twice: yt-dlp enables only `deno` by default so the others must be named at all,
+  and an engine installed by fnm, nvm or asdf lives on a `PATH` the user's shell
+  has and a desktop launcher does not.
+
+  It still installs nothing, which is the part the old application got wrong.
+  And measured honestly: on the videos this was tested against the format list was
+  identical with and without an engine, so the missing formats are yt-dlp's
+  documented risk rather than something observed here. That is why it appears on
+  the Tools page and in the guidance for the two failures it could cause, and not
+  as a banner — a persistent warning about a maybe teaches people to ignore
+  banners.
 - **No first-run setup wizard.** There is nothing to set up. A missing tool is
   an `AdwBanner`, not a gate — the library and preferences still work without
   `yt-dlp`, and gating the whole window on a download is how the old application
