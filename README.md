@@ -46,6 +46,8 @@ packages neither and local inference does not go stale.
 - Automatic language detection, or pick from sixteen.
 - Audio is converted to 16 kHz mono in the cache directory, never next to your
   file, and the scratch copy is cleaned up.
+- `magpie agent transcribe <url>` does the same thing from a terminal or an
+  assistant and prints JSON, through the same queue the window uses.
 
 **Identifying speakers**
 
@@ -265,6 +267,37 @@ Preferences → Transcripts). `./install.sh --with-diarizer` fetches the binary,
 pinned to v1.13.4. If any of it is missing or the run fails, you still get the
 plain transcript and a note saying why it has no names on it.
 
+### From a script or an assistant
+
+`magpie agent` transcribes a video without a window, printing JSON.
+
+```sh
+magpie agent tools                        # can a transcript be made here?
+magpie agent transcribe https://youtu.be/dQw4w9WgXcQ
+magpie agent transcribe https://youtu.be/dQw4w9WgXcQ format=srt speakers=2 dir=.
+magpie agent list bees                    # find one made earlier
+magpie agent show 7
+```
+
+`transcribe` downloads the audio, transcribes it, and answers when the words
+exist — so it takes minutes, and wants a long timeout or a background run.
+Progress goes to stderr; stdout is one JSON object naming the transcript file
+and the audio beside it. Options not given come from Preferences → Transcripts,
+so there is one place to set the model and the format rather than two. The
+first run downloads the speech model, which stderr says before it starts.
+
+It transcribes rather than downloads: audio only, one video, and a playlist link
+is refused. Choosing 1080p or picking eleven items out of a playlist is what the
+window is for.
+
+When Magpie is running the command is handed to it over the same D-Bus channel a
+second launch uses, so the download appears in the window and there is one list
+rather than two copies falling out of step. With nothing running, the command
+does the work itself and records it the same way.
+
+`magpie agent help` documents every verb; `magpie agent describe` prints the
+same thing as JSON, for a caller generating tool definitions.
+
 ### Where things are
 
 | | |
@@ -286,9 +319,10 @@ file.
 That split is why the interesting parts are testable with no display and no
 network — a progress line arriving in two reads, a format selector for a video
 that only exists at 1440p, a `library.json` truncated by a power cut — and it is
-what would make an MCP server cheap to add later. `DESIGN.md` has the whole
-argument, including where this deliberately differs from the Electron
-application it replaces.
+what made `magpie agent` a small addition rather than a second application:
+`src/model/agent/` decides what to refuse and what to report, and `ui/` runs the
+same jobs the window runs. `DESIGN.md` has the whole argument, including where
+this deliberately differs from the Electron application it replaces.
 
 Widget trees are built in Rust. No `.ui` files, no Blueprint, no GResource. There
 is no tokio: GLib's main loop already runs futures, and every wait here is I/O.

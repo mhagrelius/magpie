@@ -25,7 +25,7 @@ use magpie::model::progress::Snapshot;
 use magpie::model::quality::Quality;
 use magpie::model::settings::Settings;
 use magpie::model::tools::{Found, Freshness, Installers};
-use magpie::ui::{AddDialog, MagpieWindow, Preferences, ToolReport};
+use magpie::ui::{AddDialog, MagpieApplication, MagpieWindow, Preferences, ToolReport};
 
 type Case = (&'static str, fn());
 
@@ -51,10 +51,22 @@ const CASES: &[Case] = &[
         preferences_speakers,
     ),
     ("the shortcuts dialog lists the accelerators", shortcuts),
+    (
+        "an agent command reads the running application's own list",
+        agent_command,
+    ),
 ];
 
 #[test]
 fn widgets() {
+    // Before anything else, because GLib resolves the user's directories once
+    // and remembers: a case here registers a real application, which reads and
+    // writes `library.json`, and the user's own is not this test's to touch.
+    let home = tempfile::TempDir::new().expect("a temp directory");
+    std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
+    std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
+    std::env::set_var("XDG_CACHE_HOME", home.path().join("cache"));
+
     adw::init().expect("GTK and libadwaita initialise");
     // A test that waits on an animation is a test that fails on a slow machine.
     if let Some(settings) = gtk::Settings::default() {
@@ -457,6 +469,83 @@ fn shortcuts() {
     gtk::prelude::ActionGroupExt::activate_action(&window, "shortcuts", None);
     settle();
     window.destroy();
+}
+
+/// A finished download, restored from disk exactly as `library.json` holds it.
+///
+/// Written by hand rather than by saving one, so that this is also a check that
+/// the file a previous version wrote still reads back.
+const LIBRARY: &str = r#"{
+  "version": 1,
+  "jobs": [
+    {
+      "id": 4,
+      "url": "https://youtu.be/bees",
+      "title": "A talk about bees",
+      "thumbnail": null,
+      "destination": "/videos",
+      "selection": {"audio": "best"},
+      "collection": null,
+      "transcribe": {"model": "small", "format": "text", "language": null, "diarize": null},
+      "state": "done",
+      "transcript-state": {"done": "/videos/A talk about bees.txt"},
+      "outputs": ["/videos/A talk about bees.m4a"],
+      "added": "2026-08-01T10:00:00Z"
+    }
+  ]
+}"#;
+
+/// The agent command line, against a real application holding a real queue.
+///
+/// The model tests drive that surface against a list of jobs directly. What
+/// only shows up here is the wiring: that a command reaches the queue *this*
+/// process is holding, that a transcript made in an earlier session is found
+/// again through it, and that the verbs which have to run something are not
+/// answered from memory and pretended to be finished.
+fn agent_command() {
+    let data = glib::user_data_dir().join("magpie");
+    std::fs::create_dir_all(&data).expect("a data directory");
+    std::fs::write(data.join("library.json"), LIBRARY).expect("a library to restore");
+
+    let app: MagpieApplication = glib::Object::builder()
+        .property("application-id", "us.hagreli.Magpie.AgentTest")
+        .property("flags", gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+    app.register(gtk::gio::Cancellable::NONE)
+        .expect("registering emits startup, which loads the library");
+
+    let arguments = |line: &str| -> Vec<String> { line.split(' ').map(str::to_string).collect() };
+
+    let (output, ok) = app
+        .agent_command(&arguments("show 4"))
+        .expect("a verb answered from the queue");
+    assert!(ok, "the command failed: {output}");
+    assert!(output.contains("A talk about bees"), "{output}");
+    assert!(
+        output.contains("/videos/A talk about bees.txt"),
+        "the transcript is what the caller came for: {output}"
+    );
+
+    // A list finds it by what it is called, without being told the id.
+    let (output, ok) = app
+        .agent_command(&arguments("list bees"))
+        .expect("answered");
+    assert!(ok, "{output}");
+    assert!(output.contains("\"count\": 1"), "{output}");
+
+    // And a failure is reported rather than thrown.
+    let (output, ok) = app.agent_command(&arguments("show 99")).expect("answered");
+    assert!(!ok, "an impossible command should not report success");
+    assert!(output.contains("not-found"), "{output}");
+
+    // The two verbs that run other programs are not answerable here, and say so
+    // by declining rather than by returning an empty answer.
+    for line in ["transcribe https://youtu.be/abc", "tools"] {
+        assert!(
+            app.agent_command(&arguments(line)).is_none(),
+            "`{line}` has work to do before it can answer"
+        );
+    }
 }
 
 // -- fixtures ---------------------------------------------------------------

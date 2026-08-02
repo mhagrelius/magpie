@@ -17,6 +17,7 @@ use adw::subclass::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
+use crate::model::agent::{self, AgentError, ErrorKind};
 use crate::model::diarize;
 use crate::model::failure::{self, Failure};
 use crate::model::job::{Job, Progress, State, TranscriptState};
@@ -28,6 +29,7 @@ use crate::model::request;
 use crate::model::settings::Settings;
 use crate::model::speakers;
 use crate::model::store::Outcome;
+use crate::model::tools::Tool;
 use crate::model::transcript;
 use crate::APP_ID;
 
@@ -44,6 +46,19 @@ use super::window::MagpieWindow;
 /// rows that often is wasted work and makes the speed figure flicker; a quarter
 /// of a second is faster than anyone reads and slow enough to be free.
 const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often an agent command looks at the job it is waiting on.
+///
+/// Faster than anyone needs the progress, because this also decides how long
+/// after the transcript is written the caller is still waiting for its answer.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How often that command says anything about it on stderr.
+///
+/// The status line changes several times a second while a download runs, and a
+/// caller reading stderr wants to know it is alive, not to be handed a
+/// flip-book.
+const NOTE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 mod imp {
     use super::*;
@@ -64,6 +79,17 @@ mod imp {
         /// Set when something changed and the list should be redrawn on the next
         /// tick.
         pub dirty: Cell<bool>,
+        /// Set while an agent command is being answered in a process that has
+        /// no window — a `magpie agent` run on a machine with no Magpie open.
+        /// Such a process is nobody's window, so it starts the one job it was
+        /// asked for and says nothing in toasts.
+        pub headless: Cell<bool>,
+        /// One per agent command still being answered. A `gio::Application`
+        /// with nothing holding it quits when its last window closes — or
+        /// immediately, when it never had one — which would end a download
+        /// halfway through. A list rather than a slot because a running Magpie
+        /// can be handed a second command while the first is still going.
+        pub holds: RefCell<Vec<gio::ApplicationHoldGuard>>,
     }
 
     #[glib::object_subclass]
@@ -96,6 +122,36 @@ mod imp {
             let window = app.window();
             app.refresh();
             window.present();
+        }
+
+        /// Every invocation lands here, including one forwarded to the instance
+        /// already running.
+        fn command_line(&self, command_line: &gio::ApplicationCommandLine) -> glib::ExitCode {
+            let app = self.obj();
+
+            if command_line.options_dict().contains("version") {
+                command_line.print_literal(&format!("magpie {}\n", env!("CARGO_PKG_VERSION")));
+                return glib::ExitCode::SUCCESS;
+            }
+
+            let arguments: Vec<String> = command_line
+                .arguments()
+                .iter()
+                .skip(1)
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+
+            // `agent` is a command, not a launch. Handled before anything is
+            // presented, and deliberately so that it *is* the running instance
+            // that answers when there is one: that process holds the queue in
+            // memory and saves it on every change, so a second process writing
+            // `library.json` behind it would be overwritten.
+            if arguments.first().is_some_and(|word| word == "agent") {
+                return app.run_agent(command_line, &arguments[1..]);
+            }
+
+            app.activate();
+            glib::ExitCode::SUCCESS
         }
 
         fn shutdown(&self) {
@@ -131,10 +187,39 @@ impl Default for MagpieApplication {
 
 impl MagpieApplication {
     pub fn new() -> Self {
-        glib::Object::builder()
+        let app: Self = glib::Object::builder()
             .property("application-id", APP_ID)
-            .property("flags", gio::ApplicationFlags::default())
-            .build()
+            .property("flags", gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+            .build();
+
+        // GOption only looks at the command line at all once the application
+        // has declared an option of its own, and `--help` is the page a caller
+        // is guaranteed to reach by guessing. So `--version` is declared — it is
+        // the one flag a command line is expected to have — and `--help`, which
+        // comes free with it, is what says where the rest is.
+        app.add_main_option(
+            "version",
+            glib::Char::from(0),
+            glib::OptionFlags::NONE,
+            glib::OptionArg::None,
+            "Print the version and exit",
+            None,
+        );
+        app.set_option_context_parameter_string(Some("[agent VERB ...]"));
+        app.set_option_context_summary(Some(
+            "Run with no arguments to open the window.\n\n\
+             `magpie agent VERB` transcribes a video from a script or an assistant, \
+             printing JSON.\nIt is answered by the running Magpie when there is one, so \
+             the download appears in the window.",
+        ));
+        app.set_option_context_description(Some(
+            "Start with:\n  \
+             magpie agent help                    every verb, and what a transcript costs\n  \
+             magpie agent describe                the same thing as JSON\n  \
+             magpie agent tools                   whether a transcript can be made here\n  \
+             magpie agent transcribe <url>        the whole point",
+        ));
+        app
     }
 
     // -- directories --------------------------------------------------------
@@ -201,7 +286,7 @@ impl MagpieApplication {
                 glib::idle_add_local_once(glib::clone!(
                     #[weak(rename_to = app)]
                     self,
-                    move || app.window().toast(&message)
+                    move || app.toast(&message)
                 ));
             }
         }
@@ -303,6 +388,19 @@ impl MagpieApplication {
 
         self.imp().window.replace(Some(window.clone()));
         window
+    }
+
+    /// Say something in the window, if there is one to say it in.
+    ///
+    /// [`Self::window`] builds a window on demand, which is right for every
+    /// path that leads to one being shown and wrong for an `agent` command
+    /// answering in a process the user never asked for a window from. That
+    /// caller is reading JSON; a toast for it would be a window built to be
+    /// invisible.
+    fn toast(&self, message: &str) {
+        if let Some(window) = self.imp().window.borrow().clone() {
+            window.toast(message);
+        }
     }
 
     fn install_actions(&self) {
@@ -441,8 +539,7 @@ impl MagpieApplication {
 
     fn link_submitted(&self, url: &str) {
         let Some(ytdlp) = self.ytdlp() else {
-            self.window()
-                .toast("yt-dlp is not installed. See Preferences for how to install it.");
+            self.toast("yt-dlp is not installed. See Preferences for how to install it.");
             self.window().set_link_text(url);
             return;
         };
@@ -626,7 +723,16 @@ impl MagpieApplication {
     /// Called after every state change. Because `Queue::ready` is computed from
     /// the current state rather than pushed by whoever finished, there is no
     /// outcome that can forget to advance the queue.
+    ///
+    /// Except in a process with no window, where the queue restored from
+    /// `library.json` is the *window's* queue: an `agent` command runs the one
+    /// job it was asked for — started directly, in `start_agent_job` — and
+    /// advancing the rest here would download things nobody asked for and then
+    /// kill them when the command ends.
     fn pump(&self) {
+        if self.imp().headless.get() {
+            return;
+        }
         let Some(ytdlp) = self.ytdlp() else { return };
         let ready = self.imp().queue.borrow().ready();
         for id in ready {
@@ -750,7 +856,7 @@ impl MagpieApplication {
         let job = self.imp().queue.borrow().get(id).cloned();
         if let Some(job) = job {
             if job.state == State::Done {
-                self.window().toast(&format!("Saved {}", job.title));
+                self.toast(&format!("Saved {}", job.title));
             }
             if job.wants_transcript_now() {
                 self.start_transcript(id);
@@ -1152,8 +1258,7 @@ impl MagpieApplication {
         self.imp().progress.borrow_mut().remove(&id);
         self.set_transcript_state(id, TranscriptState::Done(output.to_path_buf()));
         if let Some(reason) = reason {
-            self.window()
-                .toast(&format!("Transcript ready, but no speakers — {reason}"));
+            self.toast(&format!("Transcript ready, but no speakers — {reason}"));
         }
         self.persist();
     }
@@ -1167,8 +1272,421 @@ impl MagpieApplication {
 
     fn fail_transcript(&self, id: u64, reason: &str) {
         self.set_transcript_state(id, TranscriptState::Failed(reason.to_string()));
-        self.window().toast(&format!("No transcript — {reason}"));
+        self.toast(&format!("No transcript — {reason}"));
         self.persist();
+    }
+
+    // -- the agent command line ---------------------------------------------
+
+    /// Answer an agent command that only reads, for the command line and for
+    /// tests.
+    ///
+    /// `None` means the command has work to do: `tools` asks every program its
+    /// version and `transcribe` downloads a video, and both of those are
+    /// answered when they are finished rather than here.
+    pub fn agent_command(&self, arguments: &[String]) -> Option<(String, bool)> {
+        let command = match agent::parse(arguments) {
+            Ok(command) => command,
+            Err(error) => return Some((agent::render(&Err(error)), false)),
+        };
+        let result = self.agent_read(&command)?;
+        Some((agent::render(&result), result.is_ok()))
+    }
+
+    /// The verbs answered from the queue this process is already holding.
+    fn agent_read(&self, command: &agent::Command) -> Option<Result<agent::Response, AgentError>> {
+        let jobs = || self.imp().queue.borrow().jobs().to_vec();
+
+        Some(match command {
+            agent::Command::Help { verb } => match verb {
+                None => Ok(agent::Response::Help {
+                    text: agent::help::overview(),
+                }),
+                Some(verb) => match agent::help::for_verb(verb) {
+                    Some(text) => Ok(agent::Response::Help { text }),
+                    None => Err(AgentError::hinted(
+                        ErrorKind::UnknownVerb,
+                        format!(
+                            "`{verb}` is not a verb. The verbs are: {}.",
+                            agent::help::verb_names().join(", ")
+                        ),
+                        "Run `magpie agent help` for what each one does.",
+                    )),
+                },
+            },
+            agent::Command::Describe => Ok(agent::Response::Describe {
+                verbs: agent::help::VERBS,
+            }),
+            agent::Command::List { query, limit } => {
+                Ok(agent::list(&jobs(), query.as_deref(), *limit))
+            }
+            agent::Command::Show { job } => agent::show(&jobs(), job),
+            agent::Command::Tools | agent::Command::Transcribe(_) => return None,
+        })
+    }
+
+    /// Answer an `agent` command line.
+    fn run_agent(
+        &self,
+        command_line: &gio::ApplicationCommandLine,
+        arguments: &[String],
+    ) -> glib::ExitCode {
+        // No window means this process is not the one the user is looking at:
+        // it was started by the command itself, and it exists only to answer.
+        if self.imp().window.borrow().is_none() {
+            self.imp().headless.set(true);
+        }
+
+        let command = match agent::parse(arguments) {
+            Ok(command) => command,
+            Err(error) => return self.answer(command_line, &Err(error)),
+        };
+        if let Some(result) = self.agent_read(&command) {
+            return self.answer(command_line, &result);
+        }
+
+        // Everything past here runs other programs and takes as long as it
+        // takes. The command line is kept alive so the caller goes on waiting
+        // for its answer, and the application is held so that a process with no
+        // window does not quit out from under the download.
+        self.imp().holds.borrow_mut().push(self.hold());
+        let command_line = command_line.clone();
+        match command {
+            agent::Command::Tools => self.agent_tools(command_line),
+            agent::Command::Transcribe(ask) => self.agent_transcribe(ask, command_line),
+            // `agent_read` answered everything else.
+            _ => self.finish_agent(
+                &command_line,
+                &Err(AgentError::new(
+                    ErrorKind::Refused,
+                    "That verb has nothing to run.",
+                )),
+            ),
+        }
+        glib::ExitCode::SUCCESS
+    }
+
+    /// What is installed, asked fresh rather than remembered.
+    fn agent_tools(&self, command_line: gio::ApplicationCommandLine) {
+        self.survey_then(move |app, report| {
+            let response = app.tools_response(&report);
+            app.finish_agent(&command_line, &Ok(response));
+        });
+    }
+
+    /// Download a video's audio, transcribe it, and answer when there are words.
+    fn agent_transcribe(&self, ask: agent::Ask, command_line: gio::ApplicationCommandLine) {
+        // The directory the *caller* ran the command in, which is not this
+        // process's when the command was handed to a running Magpie.
+        let cwd = command_line.cwd().unwrap_or_else(glib::home_dir);
+        let defaults = self.imp().settings.borrow().transcript.clone();
+
+        let plan = match agent::plan(&ask, &defaults, &self.destination(), &cwd) {
+            Ok(plan) => plan,
+            Err(error) => return self.finish_agent(&command_line, &Err(error)),
+        };
+
+        self.survey_then(move |app, report| {
+            if let Err(error) = agent::check(&plan, &facilities(&report)) {
+                app.finish_agent(&command_line, &Err(error));
+                return;
+            }
+            app.fetch_speech_model(plan, command_line);
+        });
+    }
+
+    /// Fetch the speech model if this machine does not have it yet.
+    ///
+    /// The window asks first and shows the size; here the caller has asked for
+    /// a transcript, and the model is the only way to make one. So it is
+    /// fetched, and stderr says what is happening and how big it is — the same
+    /// bargain the preferences page offers, with the confirmation replaced by
+    /// the request that implied it.
+    fn fetch_speech_model(&self, plan: agent::Plan, command_line: gio::ApplicationCommandLine) {
+        let models_dir = toolbox::models_directory(&self.data_dir());
+        let model = plan.wish.model;
+
+        if toolbox::model_on_disk(&models_dir, model).is_some() {
+            self.fetch_speaker_models(plan, command_line);
+            return;
+        }
+
+        note(
+            &command_line,
+            &format!(
+                "Fetching the {} speech model, {}. This happens once.",
+                model.name(),
+                crate::model::progress::format_bytes(model.bytes())
+            ),
+        );
+
+        let progress = ticker(&command_line, "Fetching the model");
+        toolbox::download_model(
+            &models_dir,
+            model,
+            progress,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| {
+                    match result {
+                    Ok(_) => app.fetch_speaker_models(plan, command_line),
+                    Err(reason) => app.finish_agent(
+                        &command_line,
+                        &Err(AgentError::hinted(
+                            ErrorKind::ToolMissing,
+                            format!("The {} speech model could not be downloaded: {reason}", model.name()),
+                            "Preferences → Transcripts downloads it too, and shows what went wrong.",
+                        )),
+                    ),
+                }
+                }
+            ),
+        );
+    }
+
+    /// The same for the two speaker models, when someone asked who is talking.
+    ///
+    /// Both or neither: one without the other is nothing, which is why the
+    /// preferences page treats them as a single download as well.
+    fn fetch_speaker_models(&self, plan: agent::Plan, command_line: gio::ApplicationCommandLine) {
+        let models_dir = toolbox::models_directory(&self.data_dir());
+        if !plan.wish.identifies_speakers() || toolbox::diarize_models_on_disk(&models_dir) {
+            self.start_agent_job(plan, command_line);
+            return;
+        }
+
+        note(
+            &command_line,
+            &format!(
+                "Fetching the speaker models, {}. This happens once.",
+                crate::model::progress::format_bytes(diarize::total_bytes())
+            ),
+        );
+
+        let progress = ticker(&command_line, "Fetching the speaker models");
+        toolbox::download_diarize_models(
+            &models_dir,
+            progress,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| match result {
+                    Ok(()) => app.start_agent_job(plan, command_line),
+                    Err(reason) => app.finish_agent(
+                        &command_line,
+                        &Err(AgentError::hinted(
+                            ErrorKind::ToolMissing,
+                            format!("The speaker models could not be downloaded: {reason}"),
+                            "Pass speakers=no to take the transcript without names.",
+                        )),
+                    ),
+                }
+            ),
+        );
+    }
+
+    fn start_agent_job(&self, plan: agent::Plan, command_line: gio::ApplicationCommandLine) {
+        let id = self.imp().queue.borrow_mut().reserve_id();
+        let job = plan.job(id);
+        let url = job.url.clone();
+
+        self.imp().queue.borrow_mut().add(job);
+        self.refresh();
+        self.persist();
+        // The title is the link until `--dump-json` answers, which it will long
+        // before the transcript is finished. The response is the better for
+        // carrying what the video is called.
+        self.name_job_later(id, url);
+
+        if self.imp().headless.get() {
+            // Started by name rather than through the queue, which in a process
+            // with no window deliberately runs nothing on its own. See `pump`.
+            if let Some(ytdlp) = self.ytdlp() {
+                self.start(id, &ytdlp);
+            }
+        } else {
+            // The window's own limit on simultaneous downloads applies, so this
+            // may wait its turn behind what the user started.
+            self.pump();
+        }
+
+        self.watch_agent_job(id, command_line);
+    }
+
+    /// Wait for the job to reach an answer, saying where it has got to.
+    ///
+    /// Polled rather than notified, so that every way a job can end — including
+    /// being cancelled from the window while this waits — arrives here through
+    /// the same door. `agent::outcome` decides what counts as an answer; this
+    /// only decides how often to ask.
+    fn watch_agent_job(&self, id: u64, command_line: gio::ApplicationCommandLine) {
+        let said = Rc::new(RefCell::new(String::new()));
+        let last = Rc::new(Cell::new(std::time::Instant::now() - NOTE_INTERVAL));
+
+        glib::timeout_add_local(
+            WATCH_INTERVAL,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let job = app.imp().queue.borrow().get(id).cloned();
+                    let Some(job) = job else {
+                        // Cancelled from the window, or removed. Either way the
+                        // thing being waited on is gone.
+                        app.finish_agent(
+                            &command_line,
+                            &Err(AgentError::new(
+                                ErrorKind::Cancelled,
+                                "The download was cancelled before it finished.",
+                            )),
+                        );
+                        return glib::ControlFlow::Break;
+                    };
+
+                    let progress = app.imp().progress.borrow().get(&id).cloned();
+                    let line = job.status_line(progress.as_ref());
+                    if *said.borrow() != line && last.get().elapsed() >= NOTE_INTERVAL {
+                        note(&command_line, &line);
+                        said.replace(line);
+                        last.set(std::time::Instant::now());
+                    }
+
+                    match agent::outcome(&job) {
+                        None => glib::ControlFlow::Continue,
+                        Some(result) => {
+                            app.finish_agent(&command_line, &result);
+                            glib::ControlFlow::Break
+                        }
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Look for every tool, then carry on with what was found.
+    ///
+    /// Surveyed rather than remembered even when this instance already has a
+    /// report: a command line is asked once and answered from what is true now,
+    /// and a tool installed since the window opened should count.
+    fn survey_then<F: FnOnce(&Self, Report) + 'static>(&self, then: F) {
+        let then = RefCell::new(Some(then));
+        let override_path = self.imp().settings.borrow().ytdlp_path.clone();
+
+        toolbox::survey(
+            override_path,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |report| {
+                    app.imp().report.replace(report.clone());
+                    app.refresh();
+                    if let Some(then) = then.borrow_mut().take() {
+                        then(&app, report);
+                    }
+                }
+            ),
+        );
+    }
+
+    fn tools_response(&self, report: &Report) -> agent::Response {
+        use crate::model::tools::Freshness;
+        use agent::view::{ModelView, ToolView};
+
+        let tools = [
+            Tool::YtDlp,
+            Tool::Ffmpeg,
+            Tool::Whisper,
+            Tool::Diarizer,
+            Tool::JsRuntime,
+        ]
+        .into_iter()
+        .map(|tool| {
+            let found = report.found(tool);
+            ToolView {
+                name: tool.label(),
+                purpose: tool.purpose(),
+                installed: found.is_some(),
+                path: found.map(|found| found.path.display().to_string()),
+                version: found.and_then(|found| found.version.clone()),
+                // Only yt-dlp's version is a date, so it is the only one with an
+                // age to report.
+                age_days: match (tool, report.freshness) {
+                    (Tool::YtDlp, Freshness::Ageing { days } | Freshness::Stale { days }) => {
+                        Some(days)
+                    }
+                    _ => None,
+                },
+                stale: tool == Tool::YtDlp && report.freshness.is_stale(),
+                install: found
+                    .is_none()
+                    .then(|| tool.install_hint(report.installers)),
+            }
+        })
+        .collect();
+
+        let models_dir = toolbox::models_directory(&self.data_dir());
+        let speech_models = transcript::Model::ALL
+            .into_iter()
+            .map(|model| {
+                let on_disk = toolbox::model_on_disk(&models_dir, model);
+                ModelView {
+                    name: model.name().to_string(),
+                    on_disk: on_disk.is_some(),
+                    bytes: on_disk.unwrap_or_else(|| model.bytes()),
+                    description: Some(model.description()),
+                }
+            })
+            .collect();
+
+        agent::Response::Tools {
+            tools,
+            speech_models,
+            speaker_models: ModelView {
+                name: "speakers".to_string(),
+                on_disk: toolbox::diarize_models_on_disk(&models_dir),
+                bytes: diarize::total_bytes(),
+                description: Some("Segmentation and voice embedding, needed together"),
+            },
+            ready: agent::readiness(&facilities(report)),
+        }
+    }
+
+    /// Print an answer and set the exit status.
+    fn answer(
+        &self,
+        command_line: &gio::ApplicationCommandLine,
+        result: &Result<agent::Response, AgentError>,
+    ) -> glib::ExitCode {
+        // `print_literal` goes back to the process that ran the command, which
+        // is what makes this work when the answer came from a different one.
+        command_line.print_literal(&format!("{}\n", agent::render(result)));
+
+        let code = match result {
+            Ok(_) => glib::ExitCode::SUCCESS,
+            Err(_) => glib::ExitCode::FAILURE,
+        };
+        // Set as well as returned: the return value is only read for a command
+        // answered before this handler comes back, and an agent transcript is
+        // answered minutes later.
+        command_line.set_exit_code(code);
+        code
+    }
+
+    /// Answer a command that was left running, and let go of both the command
+    /// line and the application.
+    fn finish_agent(
+        &self,
+        command_line: &gio::ApplicationCommandLine,
+        result: &Result<agent::Response, AgentError>,
+    ) {
+        self.answer(command_line, result);
+        // Without this the caller waits for the command line object to be
+        // dropped, which is later than the moment there is an answer.
+        command_line.done();
+        self.imp().holds.borrow_mut().pop();
     }
 
     // -- row actions --------------------------------------------------------
@@ -1262,12 +1780,12 @@ impl MagpieApplication {
     fn clear_finished(&self) {
         let cleared = self.imp().queue.borrow_mut().clear_finished();
         if cleared.is_empty() {
-            self.window().toast("Nothing finished to clear");
+            self.toast("Nothing finished to clear");
             return;
         }
         let count = cleared.len();
         self.after_change();
-        self.window().toast(&format!(
+        self.toast(&format!(
             "Cleared {count} finished download{}",
             if count == 1 { "" } else { "s" }
         ));
@@ -1312,7 +1830,7 @@ impl MagpieApplication {
             self,
             move |result: Result<(), glib::Error>| {
                 if result.is_err() {
-                    app.window().toast("Could not open that in Files");
+                    app.toast("Could not open that in Files");
                 }
             }
         );
@@ -1441,6 +1959,38 @@ impl MagpieApplication {
             ],
         );
         about.present(Some(&self.window()));
+    }
+}
+
+/// What an agent command is allowed to assume about this machine.
+fn facilities(report: &Report) -> agent::Facilities {
+    agent::Facilities {
+        ytdlp: report.ytdlp.is_some(),
+        ffmpeg: report.has_ffmpeg(),
+        whisper: report.has_whisper(),
+        diarizer: report.has_diarizer(),
+        installers: report.installers,
+    }
+}
+
+/// A line of progress for whoever is watching, on stderr.
+///
+/// Never the answer. stdout carries one JSON object and nothing else, so a
+/// caller reading only stdout is unaffected by however much is said here.
+fn note(command_line: &gio::ApplicationCommandLine, message: &str) {
+    command_line.printerr_literal(&format!("{message}\n"));
+}
+
+/// A percentage for stderr, at most once every ten points.
+fn ticker(command_line: &gio::ApplicationCommandLine, what: &'static str) -> impl Fn(f64) {
+    let command_line = command_line.clone();
+    let last = Cell::new(-1i64);
+    move |fraction: f64| {
+        let step = (fraction * 10.0).floor() as i64;
+        if step > last.get() {
+            last.set(step);
+            note(&command_line, &format!("{what} — {}%", step * 10));
+        }
     }
 }
 

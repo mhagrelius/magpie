@@ -242,6 +242,7 @@ src/
     transcript.rs     whisper-cli argument vector and progress parsing.
     diarize.rs        sherpa-onnx argument vector, turn and progress parsing.
     speakers.rs       Turns + subtitle cues -> a transcript with names on it.
+    agent/            `magpie agent`: verbs, refusals, JSON, its own help.
 
   ui/
     application.rs    MagpieApplication. Owns state; the only thing that writes.
@@ -343,32 +344,92 @@ what yt-dlp is for).
 5. Preferences, tool detection, the missing-tool and stale-tool banners.
 6. Packaging: `.deb`, Flatpak, `install.sh`.
 
+## An agent interface
+
+`magpie agent <verb>` — `model/agent/`, built after the milestones above, for an
+assistant to transcribe a video without a window. Six verbs: `help`, `describe`,
+`tools`, `transcribe`, `list`, `show`. Five decisions worth recording.
+
+**It rides the existing command line rather than a new D-Bus interface.** The
+application gains `HANDLES_COMMAND_LINE`, so a second invocation is forwarded to
+the running instance by GApplication, which is exactly the property this needs:
+that process holds the queue in memory and rewrites `library.json` on every
+change, so a separate process writing that file would be overwritten. Forwarding
+makes the running app answer, which also puts the download in the window where
+the user can watch it or cancel it. With nothing running, the invoked process
+becomes primary and does the work itself. A custom D-Bus interface would have
+bought a second copy of that plumbing and nothing else.
+
+**It waits, rather than returning a job id to poll.** A transcript takes
+minutes; the honest way to say so is to take minutes and then answer, which is
+what `g_application_command_line_done` and a hold on the application are for.
+Returning immediately would have cost more than it saved: the caller would have
+to guess when to look, and in a process with no window there is nothing to keep
+the download alive after the answer — the command would have handed back an id
+for a job it then killed. Progress goes to stderr, throttled to one line every
+five seconds, and stdout carries one JSON object.
+
+**It transcribes; it is not a downloader.** Audio only, one video, and a
+playlist link is refused. The window is where someone chooses 1080p or picks
+eleven items out of a playlist, and neither is a thing to do blind. What the
+verb *does* offer is everything about the transcript itself — format, language,
+model, speakers, where to put it — because those are the parts of the answer.
+
+**Silence means Preferences.** An option not given is read from
+`settings.transcript`, the same `Wish` the Add dialog starts from, rather than a
+default invented for the command line. A user who set SRT and the medium model
+gets them from both, and there is only one place to change them.
+
+**It refuses before it starts, and it fetches what it must.** The link, the
+directory, and every tool are checked in the first second rather than ten
+minutes into a download — those checks are pure functions in `model/agent`, so
+the sentence a caller sees on a machine with nothing installed is a unit test.
+The one thing it does download unprompted is the speech model, because the
+caller asked for a transcript and the model is the only way to make one; stderr
+says which and how big before it starts. The window asks first because a user
+who ticked a switch has not agreed to 466 MB; a caller that asked for words has.
+
+**Positional arguments, no `--flags`.** Not a style choice: GOption parses the
+command line before any of this code runs and rejects options it was not told
+about, while unknown *words* pass through. `key=value` carries the same
+information. The application declares exactly one option, `--version`, because
+GOption does not look at the command line at all until there is one — and
+without that, `--help` is not a help page but a word handed to `command_line`,
+which opens a window. `--help` is therefore GOption's, and its summary points at
+`magpie agent help`.
+
+Deliberately out: downloading video, playlists, changing preferences, cancelling
+(the window has a button, and killing the command stops it when there is no
+window), and opening files. `../familiar/docs/magpie-cli.md` documents the
+surface from the caller's side.
+
 ## Deferred
 
 **MCP into Familiar.** Familiar has no MCP client today — its tools are
 `FunctionDeclaration`s hardcoded in `model/tools.rs`, dispatched by a match arm
 in `ui/runner.rs`, and its own DESIGN.md defers MCP to "the next project". So
-Magpie ships no MCP server in v1, and the integration is designed for rather
-than built.
+Magpie ships no MCP server, and the integration is designed for rather than
+built.
 
-What makes it cheap when it happens: everything an agent would want is already a
-pure function in `model/`, taking a request and returning either an argument
-vector or a parsed result. A `magpie mcp` subcommand would be a stdio JSON-RPC
-loop over that half, adding no dependency on `ui/` and no second implementation.
-The tools it would expose map one-to-one onto what the dialog already asks for:
+The agent command line is what makes that cheap now: a `magpie mcp` subcommand
+would be a stdio JSON-RPC loop over `model::agent`, whose verb table already
+carries the name, arguments, return shape and `mutates` flag a tool definition
+needs — `magpie agent describe` emits exactly that as JSON. Nothing about it is
+a second implementation of anything.
+
+The tools left to expose if that day comes are the ones the CLI deliberately
+does not do:
 
 | Tool | Wraps |
 |---|---|
-| `video_info(url)` | `model::media::from_dump_json` over `--dump-json` |
+| `video_info(url)` | `model::media::parse` over `--dump-json` |
 | `download(url, quality, audio_only, destination)` | `model::request::Request::argv` |
-| `transcribe(url \| path, format, language)` | `model::transcript` |
-| `library_search(query)` | `model::library` |
 
 The open question is not the server, it is Familiar's side: whether Familiar
 grows a real MCP client, or whether Magpie is simply a fifth match arm in
-`Runner::run` alongside `recall` and `web_search`. The second is a day's work
-and the first is a project. That decision belongs to Familiar's next milestone,
-not to this document.
+`Runner::run` alongside `recall` and `web_search`. Spawning `magpie agent` is
+the second, and it is now a day's work rather than a project. That decision
+belongs to Familiar's next milestone, not to this document.
 
 ## Not built, or built differently
 
