@@ -60,8 +60,17 @@ pub struct Snapshot {
     pub total_bytes: Option<u64>,
     pub bytes_per_second: Option<f64>,
     pub seconds_remaining: Option<u64>,
-    /// Position within a collection, when there is one.
+    /// How far into the queue this is, and how long the queue is: `8 of 107`.
+    ///
+    /// From `playlist_autonumber`, which counts what is being downloaded, rather
+    /// than `playlist_index`, which counts the playlist. Picking four items out
+    /// of forty makes those two disagree, and it is the first that answers "how
+    /// much of this is left".
     pub item: Option<(usize, usize)>,
+    /// Which item of the playlist this is — the number `--playlist-items` uses
+    /// and the number yt-dlp puts at the front of the filename. What identifies
+    /// the item, where [`Snapshot::item`] measures the progress through them.
+    pub playlist_index: Option<usize>,
 }
 
 impl Snapshot {
@@ -99,22 +108,32 @@ pub fn parse_line(line: &str) -> Event {
     let fields: Vec<&str> = rest.trim_start_matches('\t').split('\t').collect();
 
     match fields.first().copied() {
-        Some("download") => Event::Progress(Snapshot {
-            status: field(&fields, 1).unwrap_or("downloading").to_string(),
-            downloaded_bytes: number(&fields, 2).unwrap_or(0.0) as u64,
-            // `total_bytes` is absent for a chunked response; the estimate is
-            // what yt-dlp has instead, and a bar drawn from an estimate beats
-            // no bar at all.
-            total_bytes: number(&fields, 3)
-                .or_else(|| number(&fields, 4))
-                .map(|n| n as u64),
-            bytes_per_second: number(&fields, 5),
-            seconds_remaining: number(&fields, 6).map(|n| n as u64),
-            item: match (number(&fields, 7), number(&fields, 8)) {
-                (Some(index), Some(count)) if count > 1.0 => Some((index as usize, count as usize)),
-                _ => None,
-            },
-        }),
+        Some("download") => {
+            let playlist_index = number(&fields, 7).map(|n| n as usize);
+            // Older Magpie templates had no autonumber field. The playlist index
+            // is the same number whenever nothing was filtered out, so it is the
+            // right thing to fall back to.
+            let position = number(&fields, 9).map(|n| n as usize).or(playlist_index);
+            let count = number(&fields, 8).map(|n| n as usize);
+
+            Event::Progress(Snapshot {
+                status: field(&fields, 1).unwrap_or("downloading").to_string(),
+                downloaded_bytes: number(&fields, 2).unwrap_or(0.0) as u64,
+                // `total_bytes` is absent for a chunked response; the estimate is
+                // what yt-dlp has instead, and a bar drawn from an estimate beats
+                // no bar at all.
+                total_bytes: number(&fields, 3)
+                    .or_else(|| number(&fields, 4))
+                    .map(|n| n as u64),
+                bytes_per_second: number(&fields, 5),
+                seconds_remaining: number(&fields, 6).map(|n| n as u64),
+                item: match (position, count) {
+                    (Some(position), Some(count)) if count > 1 => Some((position, count)),
+                    _ => None,
+                },
+                playlist_index,
+            })
+        }
         Some("postprocess") => Event::Postprocessing {
             status: field(&fields, 1).unwrap_or("started").to_string(),
             processor: field(&fields, 2).unwrap_or("").to_string(),
@@ -187,6 +206,91 @@ impl Meter {
 
     pub fn reset(&mut self) {
         self.samples.clear();
+    }
+}
+
+/// How long a stage has been going and how long is left, for work that reports a
+/// fraction rather than bytes.
+///
+/// [`Meter`] answers the same question from a byte rate, which is the better
+/// instrument when there are bytes. A playlist has none — its unit is the item,
+/// and the per-item byte count says nothing about the ninety-nine after it — and
+/// whisper has none either. Both do report how far along they are, and the time
+/// that took.
+///
+/// The rate is the average across the whole stage rather than a recent window,
+/// which is the opposite of what `Meter` does and for the opposite reason: a
+/// download's throughput moves with the line, where an item-by-item average is
+/// only meaningful over many items. The clock is passed in, so nothing here
+/// reads it.
+#[derive(Debug, Clone, Default)]
+pub struct Pace {
+    /// How long the stage has been going, whether or not it has moved.
+    elapsed: f64,
+    first: Option<Reading>,
+    latest: Option<Reading>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    elapsed: f64,
+    fraction: f64,
+}
+
+/// Ground covered before an estimate is worth showing. Below this, one slow
+/// first item predicts hours that never happen.
+const PACE_MIN_FRACTION: f64 = 0.03;
+
+/// And time spent, for the same reason from the other direction.
+const PACE_MIN_SECONDS: f64 = 15.0;
+
+impl Pace {
+    /// Move the clock without a new reading, so a stage that says nothing for
+    /// minutes still shows the minutes passing.
+    pub fn tick(&mut self, elapsed: std::time::Duration) {
+        self.elapsed = self.elapsed.max(elapsed.as_secs_f64());
+    }
+
+    /// Record how far along the stage is, and when.
+    pub fn observe(&mut self, elapsed: std::time::Duration, fraction: f64) {
+        self.tick(elapsed);
+        let reading = Reading {
+            elapsed: self.elapsed,
+            fraction: fraction.clamp(0.0, 1.0),
+        };
+        self.first.get_or_insert(reading);
+        self.latest = Some(reading);
+    }
+
+    pub fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.elapsed)
+    }
+
+    /// Seconds until the stage is finished, once there is enough to say so.
+    pub fn seconds_remaining(&self) -> Option<u64> {
+        let (first, latest) = (self.first?, self.latest?);
+        let covered = latest.fraction - first.fraction;
+        let took = latest.elapsed - first.elapsed;
+
+        if covered < PACE_MIN_FRACTION || took < PACE_MIN_SECONDS || latest.fraction >= 1.0 {
+            return None;
+        }
+        Some(((1.0 - latest.fraction) * took / covered).ceil() as u64)
+    }
+}
+
+/// How long something has been going: `4 minutes so far`.
+///
+/// The counterpart to [`format_remaining`], for a stage that cannot yet say how
+/// much is left. A number that is climbing is still evidence of life, which is
+/// the whole job of this line.
+pub fn format_elapsed(seconds: u64) -> String {
+    match seconds {
+        0..=44 => "just started".to_string(),
+        s if s < 90 => "1 minute so far".to_string(),
+        s if s < 3600 => format!("{} minutes so far", (s + 30) / 60),
+        s if s < 5400 => "1 hour so far".to_string(),
+        s => format!("{} hours so far", (s + 1800) / 3600),
     }
 }
 
@@ -310,17 +414,87 @@ mod tests {
 
     #[test]
     fn position_in_a_playlist_is_only_reported_when_there_is_a_playlist() {
-        let single = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t1\t1";
+        let single = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t1\t1\t1";
         let Event::Progress(snapshot) = parse_line(single) else {
             panic!()
         };
         assert_eq!(snapshot.item, None, "a playlist of one is not a playlist");
 
-        let many = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t3\t40";
+        let many = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t3\t40\t3";
         let Event::Progress(snapshot) = parse_line(many) else {
             panic!()
         };
         assert_eq!(snapshot.item, Some((3, 40)));
+        assert_eq!(snapshot.playlist_index, Some(3));
+    }
+
+    #[test]
+    fn a_filtered_playlist_counts_the_download_queue_not_the_playlist() {
+        // `--playlist-items 20,30,40` downloads three videos. yt-dlp reports the
+        // second of them as playlist_index 30 of 3 entries, which would read as
+        // "30 of 3"; playlist_autonumber is the 2 that the row wants. The index
+        // is still what names the file, so both are kept.
+        let line = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t30\t3\t2";
+        let Event::Progress(snapshot) = parse_line(line) else {
+            panic!()
+        };
+        assert_eq!(snapshot.item, Some((2, 3)));
+        assert_eq!(snapshot.playlist_index, Some(30));
+    }
+
+    #[test]
+    fn a_line_from_a_template_without_the_autonumber_still_places_the_item() {
+        // yt-dlp is asked for both, but a job started by an older Magpie is
+        // still running against the old template when this one restarts.
+        let line = "\u{1f}magpie\tdownload\tdownloading\t1\t2\tNA\tNA\tNA\t8\t107";
+        let Event::Progress(snapshot) = parse_line(line) else {
+            panic!()
+        };
+        assert_eq!(snapshot.item, Some((8, 107)));
+    }
+
+    #[test]
+    fn a_pace_says_nothing_until_it_has_seen_enough_to_be_worth_saying() {
+        let mut pace = Pace::default();
+        pace.observe(std::time::Duration::from_secs(2), 0.0);
+        assert_eq!(pace.seconds_remaining(), None, "no ground covered yet");
+
+        pace.observe(std::time::Duration::from_secs(5), 0.01);
+        assert_eq!(
+            pace.seconds_remaining(),
+            None,
+            "one percent in three seconds predicts nothing"
+        );
+    }
+
+    #[test]
+    fn a_pace_turns_ground_covered_into_time_left() {
+        // A quarter of a hundred-item playlist in ten minutes: thirty to go.
+        let mut pace = Pace::default();
+        pace.observe(std::time::Duration::from_secs(0), 0.0);
+        pace.observe(std::time::Duration::from_secs(600), 0.25);
+        assert_eq!(pace.seconds_remaining(), Some(1800));
+
+        // And it keeps counting the clock between readings, so a stage that goes
+        // quiet still has something true to show.
+        pace.tick(std::time::Duration::from_secs(900));
+        assert_eq!(pace.elapsed().as_secs(), 900);
+    }
+
+    #[test]
+    fn a_finished_pace_has_nothing_left_to_predict() {
+        let mut pace = Pace::default();
+        pace.observe(std::time::Duration::from_secs(0), 0.0);
+        pace.observe(std::time::Duration::from_secs(600), 1.0);
+        assert_eq!(pace.seconds_remaining(), None);
+    }
+
+    #[test]
+    fn elapsed_time_reads_as_words_too() {
+        assert_eq!(format_elapsed(3), "just started");
+        assert_eq!(format_elapsed(120), "2 minutes so far");
+        assert_eq!(format_elapsed(3600), "1 hour so far");
+        assert_eq!(format_elapsed(9000), "3 hours so far");
     }
 
     #[test]

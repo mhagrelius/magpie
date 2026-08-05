@@ -18,11 +18,13 @@ use std::path::PathBuf;
 use adw::prelude::*;
 use gtk::glib;
 
+use magpie::model::collection::Item;
 use magpie::model::failure::Failure;
 use magpie::model::job::{Job, Progress, State, TranscriptState};
 use magpie::model::media::{Entry, Format, Info, Media, Playlist};
 use magpie::model::progress::Snapshot;
 use magpie::model::quality::Quality;
+use magpie::model::request::Collection;
 use magpie::model::settings::Settings;
 use magpie::model::tools::{Found, Freshness, Installers};
 use magpie::ui::{AddDialog, MagpieApplication, MagpieWindow, Preferences, ToolReport};
@@ -33,6 +35,11 @@ const CASES: &[Case] = &[
     ("a fresh window shows the empty state", empty_window),
     ("a queue fills the list", populated_window),
     ("the list is ordered by what is happening", ordering),
+    ("a playlist row opens onto its items", playlist_row),
+    (
+        "a finished download offers to be transcribed",
+        transcribe_after_the_fact,
+    ),
     ("a banner appears and goes", banner),
     ("the link bar refuses prose", link_bar),
     ("the add dialog waits, then fills in", add_dialog_states),
@@ -128,6 +135,85 @@ fn populated_window() {
     // A removed job takes its row with it.
     window.set_jobs(&jobs[..1], &|_| None);
     assert_eq!(rows(&window).len(), 1);
+    window.destroy();
+}
+
+/// A playlist is one row and a hundred files. The row opens onto them, and a
+/// single video has nothing to open.
+fn playlist_row() {
+    let window = window();
+
+    let mut collection = job(1, "A playlist", State::Running);
+    collection.collection = Some(Collection {
+        folder: "A playlist".into(),
+        items: Vec::new(),
+    });
+    collection.items = (1..=3)
+        .map(|index| Item {
+            index,
+            title: format!("Chapter {index}"),
+            duration: Some(600),
+        })
+        .collect();
+    collection.outputs = vec![PathBuf::from("/home/matty/Downloads/001 - Chapter 1.m4a")];
+
+    let jobs = vec![collection, job(2, "One video", State::Running)];
+    let show = |window: &MagpieWindow| {
+        window.set_jobs(&jobs, &|id| (id == 1).then(collection_progress));
+    };
+
+    show(&window);
+    assert_eq!(
+        window.row_item_count(1),
+        0,
+        "collapsed until someone asks for it: a hundred rows nobody wanted"
+    );
+
+    // Opening it is what the application answers by redrawing, which is what
+    // fills the list in — the row itself only ever displays.
+    window.set_row_expanded(1, true);
+    show(&window);
+    assert_eq!(window.row_item_count(1), 3);
+
+    // A single video has no items and no disclosure to press.
+    window.set_row_expanded(2, true);
+    show(&window);
+    assert_eq!(window.row_item_count(2), 0);
+
+    window.destroy();
+}
+
+/// Files on disk with no words beside them can be given some, whatever was
+/// asked for at the time — and the button says so rather than going quiet when
+/// whisper is not installed.
+fn transcribe_after_the_fact() {
+    let window = window();
+    let finished = job(1, "Downloaded last week", State::Done);
+    assert!(finished.can_transcribe(), "the fixture has an output");
+
+    window.set_transcripts_available(true);
+    window.set_jobs(std::slice::from_ref(&finished), &|_| None);
+    let button = find_button_tooltipped(window.upcast_ref(), "Transcribe").expect("Transcribe");
+    assert!(button.is_sensitive());
+
+    // Without whisper it stays where it is, greyed, with the reason on it:
+    // a control that vanishes between machines is harder to learn than one that
+    // is visibly unavailable.
+    window.set_transcripts_available(false);
+    window.set_jobs(std::slice::from_ref(&finished), &|_| None);
+    let button = find_button_tooltipped(window.upcast_ref(), "Transcripts need whisper.cpp")
+        .expect("still there");
+    assert!(!button.is_sensitive());
+
+    // A job that already has its words is not offered them again.
+    let mut transcribed = finished.clone();
+    transcribed.transcripts = vec![PathBuf::from(
+        "/home/matty/Downloads/Downloaded last week.txt",
+    )];
+    window.set_transcripts_available(true);
+    window.set_jobs(&[transcribed], &|_| None);
+    assert!(find_button_tooltipped(window.upcast_ref(), "Transcribe").is_none());
+
     window.destroy();
 }
 
@@ -305,26 +391,29 @@ fn add_dialog_playlist() {
     assert_eq!(checks.len(), 3, "one per item");
     assert!(checks.iter().all(gtk::CheckButton::is_active), "all ticked");
 
+    // Nothing ticked cannot be downloaded, and the button says so rather than
+    // accepting the press and doing nothing.
     let none = find_button_labelled(dialog.upcast_ref(), "Select None").expect("Select None");
     none.emit_clicked();
     assert!(checks.iter().all(|check| !check.is_active()));
+    let download = find_button_labelled(dialog.upcast_ref(), "Download").expect("Download");
+    assert!(!download.is_sensitive());
 
-    // Transcribing forty items is an afternoon of CPU nobody asked for by
-    // flipping one switch, so the switch is not offered here at all.
+    checks[0].set_active(true);
+    assert!(download.is_sensitive());
+
+    // Transcribing a hundred items is offered but never assumed, however
+    // "transcribe by default" is set: it is hours of CPU, which is a decision.
     let transcribe = find_all::<adw::SwitchRow>(dialog.upcast_ref())
         .into_iter()
         .find(|row| row.title() == "Transcribe")
         .expect("the row still exists");
-    assert!(!transcribe.get_visible());
+    assert!(transcribe.get_visible());
     assert!(!transcribe.is_active());
-
-    // And with no transcript there is nothing to attribute.
-    let identify = find_all::<adw::SwitchRow>(dialog.upcast_ref())
-        .into_iter()
-        .find(|row| row.title() == "Identify speakers")
-        .expect("the row still exists");
-    assert!(!identify.get_visible());
-    assert!(!identify.is_active());
+    assert!(
+        transcribe.subtitle().unwrap_or_default().contains("hours"),
+        "the switch says what it costs"
+    );
 
     dialog.close();
 }
@@ -665,6 +754,20 @@ fn job(id: u64, title: &str, state: State) -> Job {
     job
 }
 
+/// Part-way through the second of three items.
+fn collection_progress() -> Progress {
+    let mut progress = Progress::default();
+    progress.observe(Snapshot {
+        status: "downloading".into(),
+        downloaded_bytes: 1,
+        total_bytes: Some(2),
+        item: Some((2, 3)),
+        playlist_index: Some(2),
+        ..Default::default()
+    });
+    progress
+}
+
 fn downloading() -> Progress {
     let mut progress = Progress::default();
     for _ in 0..10 {
@@ -674,7 +777,7 @@ fn downloading() -> Progress {
             total_bytes: Some(100_000_000),
             bytes_per_second: Some(3_200_000.0),
             seconds_remaining: Some(17),
-            item: None,
+            ..Default::default()
         });
     }
     progress
@@ -796,6 +899,16 @@ fn find_all<T: IsA<gtk::Widget>>(root: &gtk::Widget) -> Vec<T> {
         queue.extend(children);
     }
     found
+}
+
+/// A button whose tooltip starts with `text` — the icon-only ones in a row,
+/// where the tooltip carries a whole sentence when something is unavailable.
+fn find_button_tooltipped(root: &gtk::Widget, text: &str) -> Option<gtk::Button> {
+    find_all::<gtk::Button>(root).into_iter().find(|button| {
+        button
+            .tooltip_text()
+            .is_some_and(|tooltip| tooltip.starts_with(text))
+    })
 }
 
 fn find_button_labelled(root: &gtk::Widget, label: &str) -> Option<gtk::Button> {

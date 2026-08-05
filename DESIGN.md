@@ -27,7 +27,9 @@ fills in: thumbnail, title, uploader, duration, and the format choices. Press
 Download and the job joins the queue.
 
 If the link is a playlist, the dialog grows a list of entries with check boxes,
-all ticked, and the files land in a subfolder named after the playlist.
+all ticked, above a line saying what that adds up to — `All 107 items · 58 hours`
+— and the files land in a subfolder named after the playlist. Untick everything
+and Download greys out rather than looking ready and doing nothing.
 
 ```
 ┌─ Magpie ───────────────────────────────────────────── ⌂  ☰ ─┐
@@ -40,8 +42,12 @@ all ticked, and the files land in a subfolder named after the playlist.
 │   │ ▤  Blackbird singing in the dead of night         │     │
 │   │    Downloading · 47% · 3.2 MB/s · 1 min left  ⏸ ✕ │     │
 │   ├───────────────────────────────────────────────────┤     │
-│   │ ▤  How to solder without crying                   │     │
-│   │    Waiting                                    ⏸ ✕ │     │
+│   │ ▤  Bach — the complete cantatas                   │     │
+│   │    Downloading 3 of 6 · 1.1 MB/s · 14 min  ⏸ ✕ ⌄ │     │
+│   │    1  BWV 4 — Christ lag in Todesbanden   Saved ✓ │     │
+│   │    2  BWV 8 — Liebster Gott               Saved ✓ │     │
+│   │    3  BWV 12 — Weinen, Klagen        Downloading ◌│     │
+│   │    4  BWV 21 — Ich hatte viel Bekümmernis   26:51 │     │
 │   ├───────────────────────────────────────────────────┤     │
 │   │ ▤  Wind ensemble rehearsal, take 4                │     │
 │   │    Saved to Videos · transcript ready       ⌂  ✕  │     │
@@ -49,6 +55,36 @@ all ticked, and the files land in a subfolder named after the playlist.
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### A playlist is one row and a hundred files
+
+Two scales are in play and the row used to mix them. `Downloading · 8 of 107 ·
+100% · Almost done` was four true facts about the eighth file and one false
+impression about the afternoon: the percentage, the speed and the time left all
+belonged to the item in hand.
+
+So a collection's row talks about the collection. The bar and the time left
+count items — how many have landed, plus how far into the current one — where a
+single video's still count bytes. The per-file detail moves to where it belongs:
+the row opens.
+
+The expanded list is derived, never stored. The files that have landed are the
+record of what is done, matched to their items by the `008 - ` that yt-dlp's own
+output template puts at the front of each name; the item in hand comes from the
+progress line; everything else is still to come. Nothing is kept in step with
+anything, so nothing can fall out of step — including across a restart, when the
+downloaded files are still there and the subprocess is not.
+
+The entries themselves are remembered on the job when the playlist is first
+listed, so the rows have titles. A job that never had them — one queued by an
+earlier Magpie — still opens: finished items are named by their files, the rest
+are numbered, and opening the row asks yt-dlp for the names in the background.
+
+Two figures on the progress line rather than one. `playlist_index` is where an
+item sits in the playlist and what names its file; `playlist_autonumber` is how
+far into the download queue it is. They agree until someone unticks a box —
+`--playlist-items 20,30,40` makes the second item index 30 of 3 entries — and
+the row wants the second while the file wants the first.
 
 ### Choosing a format
 
@@ -120,9 +156,37 @@ default — the same four and the same default as the application this replaces,
 which is where the choice was already proven. A model is data, and downloading
 data the user asked for is ordinary.
 
-Only for a single download, never for a collection: transcribing forty playlist
-items is an afternoon of CPU nobody asked for by flipping one switch, so the
-switch is not offered for a playlist at all.
+A playlist is transcribed item by item, one whisper at a time. One at a time is
+not a limitation to lift later: whisper saturates the CPU on its own, and two of
+them produce two transcripts in twice the time while making the machine
+unusable.
+
+The pass is offered but never assumed. The Add dialog shows the switch for a
+playlist with what it costs written under it — *Every item, one after another —
+this takes hours* — and leaves it off however **Transcribe by default** is set.
+That preference is applied when a link is pasted, so it skips anything that looks
+like a playlist, and a link that turns out to be one later has the presumed wish
+taken back. A hundred and seven whisper runs is a decision; a switch meant for
+single videos did not make it.
+
+**Transcribe** on a finished row is where the decision is made afterwards. It
+looks at the files, not at what was asked for at the time, so it covers both "I
+downloaded this last week and now I want the words" and "I have the hundred and
+seven files and none of the transcripts". Pressing it clears any earlier failures,
+because pressing it is someone saying to try again.
+
+What has words is derived from two lists on the job — the media it produced and
+the transcripts written so far — matched by filename, which is safe because a
+transcript *is* the media file with a different extension. So a pass that is
+stopped, quit, and resumed the next day picks up at the first item without words
+rather than starting the hundred again. **Stop Transcribing** exists for the same
+reason: three hours of CPU needs a better way to stop than removing the row.
+
+One item that whisper cannot read — four seconds of silence, audio the model
+refuses — is recorded against that item and the pass moves on. Without the
+record it would be retried for ever and the other hundred and six would never
+start, which is the same shape of bug as the one `queue.rs` exists to prevent.
+The row's tally says so afterwards: `104 of 107 transcribed`.
 
 ### Who is speaking
 
@@ -234,6 +298,7 @@ src/
     progress.rs       A line of yt-dlp output -> a progress event. Line buffer.
     failure.rs        Exit status + stderr -> a cause the user can act on.
     media.rs          --dump-json -> Media, Format, Playlist.
+    collection.rs     A playlist job -> a line per item and where each got to.
     job.rs            One download's state machine.
     queue.rs          Ordering, parallelism, advance-on-any-outcome.
     library.rs        The record on disk. Atomic write, recover a corrupt file.
@@ -249,7 +314,8 @@ src/
     window.rs         MagpieWindow. Header bar, banner, link bar, the list.
     link_bar.rs       The entry, the paste button, the Add button.
     add_dialog.rs     Preview, format choices, playlist picker.
-    job_row.rs        One row: thumbnail, status line, progress, controls.
+    job_row.rs        One row: thumbnail, status line, progress, controls, and
+                      a playlist's items under a disclosure.
     preferences.rs    AdwPreferencesDialog, three pages.
     process.rs        The gio::Subprocess seam. Lines out, signals in.
     thumbnail.rs      Fetch and cache the poster image.

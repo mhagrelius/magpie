@@ -65,6 +65,31 @@ fn main() {
     window.set_summary(Some("1 downloading · 2 waiting"));
     render_window(&window, 720, 640, &format!("{out}/window-{suffix}.png"));
 
+    // The same queue with the playlist opened, which is the state the collapsed
+    // row exists to lead to.
+    let expanded: MagpieWindow = glib::Object::new();
+    expanded.set_transcripts_available(true);
+    expanded.set_jobs(&jobs, &|id| progress.get(&id).cloned());
+    expanded.set_row_expanded(2, true);
+    expanded.set_jobs(&jobs, &|id| progress.get(&id).cloned());
+    expanded.set_summary(Some("1 downloading · 2 waiting"));
+    render_window(&expanded, 720, 760, &format!("{out}/playlist-{suffix}.png"));
+
+    // A downloaded playlist part-way through its transcripts: one item with
+    // words, one being read, one whisper could not do, and the rest to come.
+    let transcribing: MagpieWindow = glib::Object::new();
+    let (words_jobs, words_progress) = transcribing_playlist();
+    transcribing.set_transcripts_available(true);
+    transcribing.set_jobs(&words_jobs, &|id| words_progress.get(&id).cloned());
+    transcribing.set_row_expanded(1, true);
+    transcribing.set_jobs(&words_jobs, &|id| words_progress.get(&id).cloned());
+    render_window(
+        &transcribing,
+        720,
+        480,
+        &format!("{out}/transcribing-{suffix}.png"),
+    );
+
     // Nothing yet: the state a first run opens in.
     let empty: MagpieWindow = glib::Object::new();
     empty.set_jobs(&[], &|_| None);
@@ -192,22 +217,40 @@ fn busy_queue() -> (Vec<Job>, HashMap<u64, Progress>) {
     progress.insert(1, meter_at(47_000_000, 100_000_000, 3_200_000.0, None));
     jobs.push(running);
 
-    let mut playlist_item = Job::new(
+    let mut collection = Job::new(
         2,
         "https://www.youtube.com/playlist?list=PL1".into(),
         "Bach — the complete cantatas".into(),
         downloads.clone(),
     );
-    playlist_item.state = State::Running;
-    playlist_item.collection = Some(Collection {
+    collection.state = State::Running;
+    collection.collection = Some(Collection {
         folder: "Bach — the complete cantatas".into(),
         items: Vec::new(),
     });
-    progress.insert(
-        2,
-        meter_at(12_000_000, 240_000_000, 1_100_000.0, Some((3, 40))),
-    );
-    jobs.push(playlist_item);
+    collection.items = magpie::model::collection::items(&playlist().entries, &[]);
+    // Two of the six on disk, so the expanded row shows all three states at
+    // once: saved, downloading, and still to come.
+    collection.outputs = (1..=2)
+        .map(|index| {
+            downloads.join("Bach — the complete cantatas").join(format!(
+                "{index:03} - {}.mkv",
+                playlist().entries[index - 1].title
+            ))
+        })
+        .collect();
+    let mut collection_progress = meter_at(12_000_000, 240_000_000, 1_100_000.0, Some((3, 6)));
+    collection_progress.snapshot.playlist_index = Some(3);
+    // A quarter done in ten minutes, so the row has a figure for the whole
+    // playlist rather than for the file in hand.
+    collection_progress
+        .pace
+        .observe(std::time::Duration::from_secs(0), 0.0);
+    collection_progress
+        .pace
+        .observe(std::time::Duration::from_secs(600), 0.42);
+    progress.insert(2, collection_progress);
+    jobs.push(collection);
 
     let mut paused = Job::new(
         3,
@@ -256,7 +299,8 @@ fn busy_queue() -> (Vec<Job>, HashMap<u64, Progress>) {
     );
     done.state = State::Done;
     done.outputs = vec![downloads.join("Field recording — dawn chorus.opus")];
-    done.transcript_state = TranscriptState::Done(downloads.join("Field recording.txt"));
+    done.transcripts = vec![downloads.join("Field recording — dawn chorus.txt")];
+    done.transcript_state = TranscriptState::Done(done.transcripts[0].clone());
     jobs.push(done);
 
     // Failed with a cause that no amount of retrying will change, so the row
@@ -273,6 +317,48 @@ fn busy_queue() -> (Vec<Job>, HashMap<u64, Progress>) {
     (jobs, progress)
 }
 
+/// A finished playlist working its way through its transcripts.
+fn transcribing_playlist() -> (Vec<Job>, HashMap<u64, Progress>) {
+    let downloads = PathBuf::from("/home/matty/Downloads");
+    let folder = downloads.join("Bach — the complete cantatas");
+    let entries = playlist().entries;
+
+    let mut job = Job::new(
+        1,
+        "https://www.youtube.com/playlist?list=PL1".into(),
+        "Bach — the complete cantatas".into(),
+        downloads,
+    );
+    job.state = State::Done;
+    job.collection = Some(Collection {
+        folder: "Bach — the complete cantatas".into(),
+        items: Vec::new(),
+    });
+    job.items = magpie::model::collection::items(&entries, &[]);
+    job.outputs = entries
+        .iter()
+        .map(|entry| folder.join(format!("{:03} - {}.m4a", entry.index, entry.title)))
+        .collect();
+    job.transcribe = Some(transcript::Wish::default());
+    job.transcript_state = TranscriptState::Running;
+    job.transcripts = vec![folder.join(format!("001 - {}.txt", entries[0].title))];
+    // The second is four seconds of silence, which whisper writes nothing for.
+    job.transcript_failures = vec![job.outputs[1].clone()];
+
+    let mut progress = Progress {
+        transcript_fraction: Some(0.4),
+        ..Progress::default()
+    };
+    progress
+        .pace
+        .observe(std::time::Duration::from_secs(0), 0.0);
+    progress
+        .pace
+        .observe(std::time::Duration::from_secs(900), 0.4);
+
+    (Vec::from([job]), HashMap::from([(1, progress)]))
+}
+
 /// Ten identical samples, so the smoothed rate equals the given one and the
 /// picture is the same every run.
 fn meter_at(downloaded: u64, total: u64, speed: f64, item: Option<(usize, usize)>) -> Progress {
@@ -285,6 +371,7 @@ fn meter_at(downloaded: u64, total: u64, speed: f64, item: Option<(usize, usize)
             bytes_per_second: Some(speed),
             seconds_remaining: Some(((total - downloaded) as f64 / speed) as u64),
             item,
+            ..Default::default()
         });
     }
     progress

@@ -19,6 +19,7 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 use gtk::glib::subclass::Signal;
 
+use crate::model::collection;
 use crate::model::failure::Failure;
 use crate::model::media::{self, Info, Media, Playlist};
 use crate::model::quality::{AudioFormat, Quality};
@@ -37,6 +38,9 @@ pub struct Choice {
     pub destination: PathBuf,
     pub selection: Selection,
     pub collection: Option<Collection>,
+    /// The items that were ticked, so the row can list them without asking
+    /// yt-dlp about the playlist a second time.
+    pub items: Vec<collection::Item>,
     pub transcribe: Option<transcript::Wish>,
 }
 
@@ -497,6 +501,10 @@ impl AddDialog {
             .set_visible_child_name("ready");
         imp.download.get().expect("built").set_sensitive(true);
         imp.retry.get().expect("built").set_visible(false);
+        // After the info is in place, so the summary can total the durations —
+        // and after Download is enabled, so it can take that back for a playlist
+        // with nothing ticked.
+        self.refresh_items_summary();
         // The safe, expected action gets the focus so Enter does the obvious
         // thing.
         imp.download.get().expect("built").grab_focus();
@@ -568,7 +576,14 @@ impl AddDialog {
         // both belong to this branch.
         self.set_exact_formats(media);
         imp.items_group.get().expect("built").set_visible(false);
-        imp.transcribe.get().expect("built").set_visible(true);
+
+        let transcribe = imp.transcribe.get().expect("built");
+        transcribe.set_visible(true);
+        transcribe.set_subtitle("Write a text transcript next to the file");
+        // One video is what "transcribe by default" was meant for, so here the
+        // preference does decide.
+        transcribe
+            .set_active(transcribe.is_sensitive() && imp.settings.borrow().transcribe_by_default);
         imp.identify.get().expect("built").set_visible(true);
         self.refresh_identify_row();
     }
@@ -598,6 +613,11 @@ impl AddDialog {
                 .active(true)
                 .valign(gtk::Align::Center)
                 .build();
+            check.connect_toggled(glib::clone!(
+                #[weak(rename_to = dialog)]
+                self,
+                move |_| dialog.refresh_items_summary()
+            ));
             let row = adw::ActionRow::builder()
                 .title(glib::markup_escape_text(&entry.title))
                 .subtitle(
@@ -615,15 +635,15 @@ impl AddDialog {
         imp.checks.replace(checks);
         imp.items_group.get().expect("built").set_visible(true);
 
-        // Transcribing forty items is an afternoon of CPU nobody asked for by
-        // flipping one switch, so the switch is not offered for a collection.
+        // Offered, but never on by default however the preference is set:
+        // transcribing forty items is an afternoon of CPU, and that is a
+        // decision rather than a default. The subtitle says so.
         let transcribe = imp.transcribe.get().expect("built");
+        transcribe.set_visible(true);
         transcribe.set_active(false);
-        transcribe.set_visible(false);
-        // And with no transcript there is nothing to attribute.
-        let identify = imp.identify.get().expect("built");
-        identify.set_active(false);
-        identify.set_visible(false);
+        transcribe.set_subtitle("Every item, one after another — this takes hours");
+        imp.identify.get().expect("built").set_visible(true);
+        self.refresh_identify_row();
 
         // A format id from item one means nothing for item two.
         self.clear_exact_formats();
@@ -787,6 +807,61 @@ impl AddDialog {
         }
     }
 
+    /// What ticking those boxes adds up to, and whether it adds up to anything.
+    ///
+    /// Select None used to leave a Download button that looked ready and did
+    /// nothing at all when pressed — `build_choice` returned `None` and the
+    /// dialog simply sat there. A button that cannot work is a button that says
+    /// so.
+    fn refresh_items_summary(&self) {
+        let imp = self.imp();
+        let Some(group) = imp.items_group.get() else {
+            return;
+        };
+        if !group.get_visible() {
+            return;
+        }
+
+        let selected: Vec<usize> = imp
+            .checks
+            .borrow()
+            .iter()
+            .filter(|(_, check)| check.is_active())
+            .map(|(index, _)| *index)
+            .collect();
+        let total = imp.checks.borrow().len();
+
+        let mut parts = vec![match selected.len() {
+            count if count == total => format!("All {total} items"),
+            count => format!("{count} of {total} selected"),
+        }];
+        if let Some(seconds) = self.selected_duration(&selected) {
+            parts.push(media::format_total(seconds));
+        }
+        group.set_description(Some(&parts.join(" · ")));
+
+        if let Some(download) = imp.download.get() {
+            download.set_sensitive(!selected.is_empty());
+        }
+    }
+
+    /// How long the ticked items run to, when every one of them says.
+    ///
+    /// `None` if any does not: a total that silently leaves out the four items
+    /// with no duration is a total that is wrong by four items.
+    fn selected_duration(&self, selected: &[usize]) -> Option<u64> {
+        let info = self.imp().info.borrow();
+        let Some(Info::Collection(playlist)) = info.as_ref() else {
+            return None;
+        };
+        playlist
+            .entries
+            .iter()
+            .filter(|entry| selected.contains(&entry.index))
+            .map(|entry| entry.duration)
+            .sum()
+    }
+
     fn choose_folder(&self) {
         let dialog = gtk::FileDialog::builder()
             .title("Choose Download Folder")
@@ -831,6 +906,7 @@ impl AddDialog {
         let info = info.as_ref()?;
 
         let selection = self.build_selection(info);
+        let mut chosen: Vec<collection::Item> = Vec::new();
         let collection = match info {
             Info::Collection(playlist) => {
                 let checks = imp.checks.borrow();
@@ -843,6 +919,7 @@ impl AddDialog {
                     // Nothing ticked is not a request to download everything.
                     return None;
                 }
+                chosen = collection::items(&playlist.entries, &items);
                 Some(Collection {
                     folder: request::folder_name(&playlist.title),
                     // Every item ticked is expressed as no filter at all, which
@@ -860,7 +937,7 @@ impl AddDialog {
 
         let transcribe = {
             let row = imp.transcribe.get().expect("built");
-            (row.is_sensitive() && row.is_active() && collection.is_none())
+            (row.is_sensitive() && row.is_active())
                 .then(|| imp.settings.borrow().transcript.clone())
                 .map(|mut wish| {
                     // The switch decides whether to identify speakers; how many
@@ -888,6 +965,7 @@ impl AddDialog {
             destination: imp.destination.borrow().clone(),
             selection,
             collection,
+            items: chosen,
             transcribe,
         })
     }

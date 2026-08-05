@@ -7,7 +7,7 @@
 //! done, failed, cancelled, removed — lets the next one start, and there is no
 //! handler that can be forgotten.
 
-use super::job::{Job, State};
+use super::job::{Job, State, TranscriptState};
 
 /// Downloads that may run at once.
 ///
@@ -45,6 +45,14 @@ impl Queue {
             .map(|mut job| {
                 if job.state.is_active() {
                     job.state = State::Waiting;
+                }
+                // A transcript made before Magpie kept a list of them lives only
+                // in the state. Without this the row offers to transcribe a file
+                // that already has words beside it.
+                if let TranscriptState::Done(path) = &job.transcript_state {
+                    if job.transcripts.is_empty() {
+                        job.transcripts.push(path.clone());
+                    }
                 }
                 job
             })
@@ -246,6 +254,22 @@ mod tests {
             State::Done,
             "done stays done"
         );
+    }
+
+    #[test]
+    fn a_transcript_made_before_the_list_existed_is_not_offered_again() {
+        // The path used to live only in the state. A restored job whose words
+        // are already written must not show a Transcribe button.
+        let mut queue = queue(1, 1);
+        let job = queue.get_mut(1).unwrap();
+        job.state = State::Done;
+        job.outputs = vec![PathBuf::from("/videos/a.mkv")];
+        job.transcript_state = TranscriptState::Done(PathBuf::from("/videos/a.txt"));
+
+        let restored = Queue::restore(queue.jobs().to_vec(), 1);
+        let job = restored.get(1).unwrap();
+        assert_eq!(job.transcripts, vec![PathBuf::from("/videos/a.txt")]);
+        assert!(!job.can_transcribe());
     }
 
     #[test]

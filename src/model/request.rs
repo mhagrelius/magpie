@@ -256,7 +256,12 @@ const DOWNLOAD_TEMPLATE: &str = concat!(
     "%(progress.speed)s\t",
     "%(progress.eta)s\t",
     "%(info.playlist_index)s\t",
-    "%(info.n_entries)s"
+    "%(info.n_entries)s\t",
+    // Both, because they answer different questions and disagree the moment
+    // anything is filtered out: `playlist_index` is where the item sits in the
+    // playlist and what names its file, `playlist_autonumber` is how far into
+    // the download queue it is. See `progress::Snapshot`.
+    "%(info.playlist_autonumber)s"
 );
 
 const POSTPROCESS_TEMPLATE: &str = concat!(
@@ -369,6 +374,23 @@ mod tests {
         assert!(args.contains(&"--progress".to_string()));
         assert!(args.contains(&"--no-color".to_string()));
         assert!(args.iter().any(|a| a.starts_with("download:\u{1f}magpie")));
+    }
+
+    #[test]
+    fn the_template_asks_where_the_item_sits_and_how_far_in_it_is() {
+        // `--playlist-items 20,30` downloads two videos, and yt-dlp calls the
+        // second one index 30 of 2 entries. Without the autonumber the row says
+        // "30 of 2".
+        let template = request()
+            .argv()
+            .into_iter()
+            .find(|a| a.starts_with("download:"))
+            .expect("a download template");
+        assert!(template.contains("%(info.playlist_index)s"), "{template}");
+        assert!(
+            template.contains("%(info.playlist_autonumber)s"),
+            "{template}"
+        );
     }
 
     #[test]

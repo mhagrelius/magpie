@@ -8,7 +8,7 @@
 //! The window holds no queue. It is given jobs to display and emits what the
 //! user asked for; [`super::MagpieApplication`] owns the state.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::OnceLock;
 
 use adw::prelude::*;
@@ -44,6 +44,9 @@ mod imp {
         pub subtitle: OnceCell<adw::WindowTitle>,
         pub rows: RefCell<Vec<JobRow>>,
         pub banner_action: RefCell<Option<String>>,
+        /// Whether this machine can make a transcript at all, which decides
+        /// whether a finished row's Transcribe button is offered or greyed.
+        pub transcripts_available: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -70,6 +73,11 @@ mod imp {
                     // eight keeps the application's wiring to a single match.
                     Signal::builder("job-action")
                         .param_types([u64::static_type(), str::static_type()])
+                        .build(),
+                    // A job and one item of its collection: `Show in Files` on
+                    // a playlist entry that has landed.
+                    Signal::builder("job-item-action")
+                        .param_types([u64::static_type(), u64::static_type(), str::static_type()])
                         .build(),
                     Signal::builder("banner-activated").build(),
                 ]
@@ -316,6 +324,7 @@ impl MagpieWindow {
         });
         ordered.truncate(VISIBLE_ROWS);
 
+        let whisper = imp.transcripts_available.get();
         let mut rows = imp.rows.borrow_mut();
 
         // Drop rows for jobs that are gone.
@@ -337,7 +346,7 @@ impl MagpieWindow {
                     row
                 }
             };
-            row.bind(job, progress(job.id).as_ref());
+            row.bind(job, progress(job.id).as_ref(), whisper);
             if row.parent().is_none() {
                 list.append(&row);
             }
@@ -366,6 +375,9 @@ impl MagpieWindow {
             ("open-requested", "open"),
             ("transcript-requested", "transcript"),
             ("details-requested", "details"),
+            ("expand-requested", "expand"),
+            ("transcribe-requested", "transcribe"),
+            ("stop-transcript-requested", "stop-transcript"),
         ] {
             row.connect_closure(
                 signal,
@@ -379,6 +391,54 @@ impl MagpieWindow {
                 ),
             );
         }
+
+        for (signal, action) in [
+            ("item-open-requested", "open"),
+            ("item-transcript-requested", "transcript"),
+        ] {
+            row.connect_closure(
+                signal,
+                false,
+                glib::closure_local!(
+                    #[watch(rename_to = window)]
+                    self,
+                    move |row: JobRow, index: u64| {
+                        window.emit_by_name::<()>("job-item-action", &[&row.id(), &index, &action]);
+                    }
+                ),
+            );
+        }
+    }
+
+    /// Open or close one row's list of playlist items.
+    ///
+    /// The user does this with the disclosure button. Exposed for
+    /// `tests/widgets.rs` and `examples/preview.rs`, which have no pointer to
+    /// press it with and for which the expanded row is the state worth looking
+    /// at.
+    pub fn set_row_expanded(&self, id: u64, expanded: bool) {
+        if let Some(row) = self.imp().rows.borrow().iter().find(|row| row.id() == id) {
+            row.set_expanded(expanded);
+        }
+    }
+
+    /// Whether a transcript can be made on this machine.
+    ///
+    /// Set before the rows are bound, so a finished row can offer Transcribe or
+    /// grey it out with a reason rather than accepting the press and then
+    /// explaining itself in a toast.
+    pub fn set_transcripts_available(&self, available: bool) {
+        self.imp().transcripts_available.set(available);
+    }
+
+    /// How many item lines one row is showing, for `tests/widgets.rs`.
+    pub fn row_item_count(&self, id: u64) -> usize {
+        self.imp()
+            .rows
+            .borrow()
+            .iter()
+            .find(|row| row.id() == id)
+            .map_or(0, JobRow::item_count)
     }
 
     /// A poster for one row, if that row is on screen.

@@ -69,3 +69,27 @@
   background-color: var(--card-bg-color);
   border-radius: 12px;
 }
+
+/* The disclosure on a playlist row, which behaves as AdwExpanderRow's does: the
+ * chevron points at the answer, so the toggle does not also need to fill in to
+ * say it is open. Without this it is the one button in the row with a
+ * background. */
+.job-disclosure:checked {
+  background: none;
+  box-shadow: none;
+}
+
+/* The items of a playlist, revealed under the row they belong to. Transparent
+ * and separated by a rule rather than boxed: this is part of its row, not a
+ * second card sitting inside one. */
+.job-items {
+  background: none;
+  border-top: 1px solid var(--border-color);
+  padding-top: 6px;
+}
+
+.job-items > row {
+  background: none;
+  border-radius: 6px;
+  min-height: 0;
+}

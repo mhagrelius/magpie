@@ -203,7 +203,7 @@ fn the_speed_shown_is_smoothed_rather_than_the_last_reading() {
             total_bytes: Some(200_000_000),
             bytes_per_second: Some(speed),
             seconds_remaining: Some(2),
-            item: None,
+            ..Default::default()
         });
     }
 

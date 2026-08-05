@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod collection;
 pub mod diarize;
 pub mod failure;
 pub mod job;

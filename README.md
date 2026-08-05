@@ -28,7 +28,8 @@ packages neither and local inference does not go stale.
   listed.
 - Playlists and channels arrive as a checklist, all ticked, saved into a
   subfolder in playlist order. A `watch?v=…&list=…` link is treated as the one
-  video you clicked.
+  video you clicked. While one runs, its row opens onto a line per item — what
+  has landed, what is downloading, what is still to come.
 - A queue that survives closing the window, with a configurable number of
   downloads running at once.
 - Pause and resume (`SIGSTOP`/`SIGCONT`), cancel, retry, and resume from a
@@ -40,7 +41,8 @@ packages neither and local inference does not go stale.
 **Transcripts**
 
 - Transcribe a finished download to plain text, SRT or WebVTT, written beside the
-  media file. Per download, or on by default.
+  media file. Per download, or on by default, or after the fact from the row —
+  including a whole playlist, item by item.
 - Four whisper models from Tiny to Medium, downloaded on demand with the size
   shown first and a button to delete one afterwards.
 - Automatic language detection, or pick from sixteen.
@@ -180,9 +182,25 @@ available* is a copy rather than a transcode, so it needs nothing.
 
 ### Playlists and channels
 
-A playlist link shows every item with a check box, all ticked. Untick what you do
-not want. The files go into a subfolder named after the playlist, numbered in
-playlist order.
+A playlist link shows every item with a check box, all ticked, and a line saying
+what that comes to — `All 107 items · 58 hours`. Untick what you do not want. The
+files go into a subfolder named after the playlist, numbered in playlist order.
+
+In the queue a playlist is one row with a chevron at its end. Press it and the
+row opens onto its items: the ones already saved with a tick beside them, the one
+being fetched with a spinner, and the rest with their durations. Clicking a saved
+item shows it in Files.
+
+The row's own figures are about the playlist rather than the file in hand, so
+`Downloading 8 of 107 · 7.9 MB/s · 3 hours left` means three hours until the
+playlist is done, and the bar fills as items land.
+
+A playlist can be transcribed, item by item. The switch is offered in the Add
+dialog but never on by default — it is hours of CPU — and the row's **Transcribe**
+button starts the same pass on anything already downloaded, which is how you
+catch up a playlist fetched before you wanted the words. Each item's transcript
+appears beside it in the expanded row. **Stop Transcribing** halts the pass, and
+starting it again picks up at the first item that has none.
 
 A link with both a video and a playlist in it — `watch?v=…&list=…` — is treated
 as the one video you clicked.

@@ -18,6 +18,7 @@ use gtk::gio;
 use gtk::glib;
 
 use crate::model::agent::{self, AgentError, ErrorKind};
+use crate::model::collection;
 use crate::model::diarize;
 use crate::model::failure::{self, Failure};
 use crate::model::job::{Job, Progress, State, TranscriptState};
@@ -73,6 +74,9 @@ mod imp {
         /// whatever its state says.
         pub handles: RefCell<HashMap<u64, Handle>>,
         pub progress: RefCell<HashMap<u64, Progress>>,
+        /// Jobs whose playlist is being listed right now, so that opening and
+        /// closing a row four times does not ask yt-dlp four times.
+        pub listing: RefCell<std::collections::HashSet<u64>>,
         pub thumbnails: OnceCell<thumbnail::Cache>,
         pub window: RefCell<Option<MagpieWindow>>,
         pub preferences: RefCell<Option<Preferences>>,
@@ -366,6 +370,17 @@ impl MagpieApplication {
             ),
         );
         window.connect_closure(
+            "job-item-action",
+            false,
+            glib::closure_local!(
+                #[watch(rename_to = app)]
+                self,
+                move |_: MagpieWindow, id: u64, index: u64, action: &str| {
+                    app.item_action(id, index, action)
+                }
+            ),
+        );
+        window.connect_closure(
             "banner-activated",
             false,
             glib::closure_local!(
@@ -443,13 +458,63 @@ impl MagpieApplication {
                 #[upgrade_or]
                 glib::ControlFlow::Break,
                 move || {
-                    if app.imp().dirty.replace(false) {
+                    // Two reasons to redraw: something changed, or a stage is
+                    // running whose only news is that time is passing.
+                    let ticking = app.tick_stages();
+                    if app.imp().dirty.replace(false) || ticking {
                         app.refresh();
                     }
                     glib::ControlFlow::Continue
                 }
             ),
         );
+    }
+
+    /// Keep the clock moving on the stages that report nothing for minutes.
+    ///
+    /// whisper prints a percentage every five per cent, which on a long
+    /// recording is minutes apart, and ffmpeg says nothing at all while it
+    /// converts. Without this the row freezes between readings and reads as a
+    /// job that has stopped. Reports whether anything is running, which is also
+    /// the answer to "is a redraw worth doing".
+    fn tick_stages(&self) -> bool {
+        let imp = self.imp();
+        let waiting: Vec<u64> = imp
+            .queue
+            .borrow()
+            .jobs()
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.transcript_state,
+                    TranscriptState::Converting
+                        | TranscriptState::Running
+                        | TranscriptState::Identifying
+                )
+            })
+            .map(|job| job.id)
+            .collect();
+        if waiting.is_empty() {
+            return false;
+        }
+
+        let now = std::time::Instant::now();
+        let mut progress = imp.progress.borrow_mut();
+        for id in waiting {
+            progress.entry(id).or_default().tick(now);
+        }
+        true
+    }
+
+    /// Start the clock on a new stage of a job: the download, the conversion,
+    /// whisper, the speaker pass.
+    fn begin_stage(&self, id: u64) {
+        self.imp()
+            .progress
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .begin_stage(std::time::Instant::now());
     }
 
     fn touch(&self) {
@@ -470,6 +535,7 @@ impl MagpieApplication {
         let progress = imp.progress.borrow().clone();
         let banner = imp.report.borrow().banner();
 
+        window.set_transcripts_available(imp.report.borrow().has_whisper());
         window.set_jobs(&jobs, &|id| progress.get(&id).cloned());
         window.set_summary(summary.as_deref());
         window.set_banner(
@@ -641,6 +707,7 @@ impl MagpieApplication {
         job.thumbnail = choice.thumbnail;
         job.selection = choice.selection;
         job.collection = choice.collection;
+        job.items = choice.items;
         job.transcribe = choice.transcribe;
         if job.transcribe.is_some() {
             job.transcript_state = TranscriptState::Waiting;
@@ -667,7 +734,12 @@ impl MagpieApplication {
         } else {
             request::Selection::Video(settings.quality)
         };
-        if settings.transcribe_by_default && imp.report.borrow().has_whisper() {
+        // Not for a link that looks like a playlist. "Transcribe by default" is
+        // about the video someone pastes, and applying it to a hundred and seven
+        // of them is hours of CPU that nobody chose. The Add dialog offers the
+        // choice, and the row's Transcribe button is how it is made afterwards.
+        let presumable = !crate::model::url::is_collection(url);
+        if settings.transcribe_by_default && presumable && imp.report.borrow().has_whisper() {
             job.transcribe = Some(settings.transcript.clone());
             job.transcript_state = TranscriptState::Waiting;
         }
@@ -704,10 +776,18 @@ impl MagpieApplication {
                     }
                     Info::Collection(playlist) => {
                         job.title = playlist.title.clone();
+                        job.items = collection::items(&playlist.entries, &[]);
                         job.collection = Some(request::Collection {
                             folder: request::folder_name(&playlist.title),
                             items: Vec::new(),
                         });
+                        // The link turned out to be a hundred videos, and
+                        // Magpie transcribes one. Said here, at the first moment
+                        // it is known, rather than left as a promise on the row.
+                        if job.transcript_was_presumed() {
+                            job.transcribe = None;
+                            job.transcript_state = TranscriptState::None;
+                        }
                     }
                 }
                 drop(queue);
@@ -791,6 +871,7 @@ impl MagpieApplication {
             Ok(handle) => {
                 imp.handles.borrow_mut().insert(id, handle);
                 imp.progress.borrow_mut().insert(id, Progress::default());
+                self.begin_stage(id);
                 if let Some(job) = imp.queue.borrow_mut().get_mut(id) {
                     job.state = State::Running;
                 }
@@ -807,15 +888,72 @@ impl MagpieApplication {
         let Some(entry) = progress.get_mut(&id) else {
             return;
         };
+        // yt-dlp moving on to the next item of a playlist is the moment the last
+        // one finished, and the only announcement of it there is.
+        let mut moved_on = false;
         match parse_line(line) {
-            Event::Progress(snapshot) => entry.observe(snapshot),
+            Event::Progress(snapshot) => {
+                moved_on = snapshot.playlist_index != entry.snapshot.playlist_index;
+                entry.observe(snapshot);
+            }
             Event::Postprocessing { status, processor } => {
                 entry.postprocessing = (status != "finished").then_some(processor);
             }
             Event::Chatter(_) => return,
         }
         drop(progress);
+
+        if moved_on {
+            self.collect_outputs(id);
+        }
+        self.observe_collection(id);
         self.touch();
+    }
+
+    /// Take the finished paths yt-dlp has written so far.
+    ///
+    /// The sink is read at the end of every job anyway; a collection is read as
+    /// it goes, because "which of the hundred and seven do I already have" is a
+    /// question with an answer long before the job is over. The file is the only
+    /// record, so there is nothing here that can fall out of step with it.
+    fn collect_outputs(&self, id: u64) {
+        let imp = self.imp();
+        if !imp
+            .queue
+            .borrow()
+            .get(id)
+            .is_some_and(|job| job.collection.is_some())
+        {
+            return;
+        }
+
+        let outputs = read_sink(&request::sink_path(&self.cache_dir(), id));
+        if let Some(job) = imp.queue.borrow_mut().get_mut(id) {
+            merge_outputs(&mut job.outputs, outputs);
+        }
+    }
+
+    /// Tell a collection's clock how much of the collection is done.
+    ///
+    /// The byte meter measures the file in hand, which for a playlist answers
+    /// the wrong question. Items finished over time is the rate that predicts
+    /// when the job ends.
+    fn observe_collection(&self, id: u64) {
+        let imp = self.imp();
+        let queue = imp.queue.borrow();
+        let Some(job) = queue.get(id) else {
+            return;
+        };
+        if job.collection.is_none() {
+            return;
+        }
+        let mut progress = imp.progress.borrow_mut();
+        let Some(entry) = progress.get_mut(&id) else {
+            return;
+        };
+        if let Some(fraction) = collection::fraction(job, Some(&*entry)) {
+            entry.advance(std::time::Instant::now(), fraction);
+        }
     }
 
     fn download_finished(&self, id: u64, outcome: process::Outcome, sink: &Path) {
@@ -825,7 +963,7 @@ impl MagpieApplication {
             process::Outcome::Success => {
                 let outputs = read_sink(sink);
                 if let Some(job) = self.imp().queue.borrow_mut().get_mut(id) {
-                    job.outputs = outputs;
+                    merge_outputs(&mut job.outputs, outputs);
                 }
                 State::Done
             }
@@ -874,12 +1012,19 @@ impl MagpieApplication {
 
     // -- transcripts --------------------------------------------------------
 
+    /// Transcribe the next file of this job that has none.
+    ///
+    /// Called once when a download finishes and once again after every item, so
+    /// a playlist works its way through its files one at a time. One at a time
+    /// deliberately: whisper saturates the CPU on its own, and two of them
+    /// finish two transcripts in twice the time while making the machine
+    /// unusable.
     fn start_transcript(&self, id: u64) {
         let imp = self.imp();
         let Some(job) = imp.queue.borrow().get(id).cloned() else {
             return;
         };
-        let Some(media_path) = job.single_output().cloned() else {
+        let Some(media_path) = job.next_untranscribed().cloned() else {
             return;
         };
         let Some(wish) = job.transcribe.clone() else {
@@ -907,8 +1052,10 @@ impl MagpieApplication {
             };
             let wav = transcript::conversion_path(&self.cache_dir(), id);
             self.set_transcript_state(id, TranscriptState::Converting);
+            self.begin_pass(id);
 
             let args = transcript::conversion_argv(&media_path, &wav);
+            let failed = media_path.clone();
             let handle = process::run(
                 &ffmpeg,
                 &args,
@@ -930,7 +1077,7 @@ impl MagpieApplication {
                         }
                         process::Outcome::Cancelled => {}
                         process::Outcome::Failed { .. } => {
-                            app.fail_transcript(id, "the audio could not be prepared")
+                            app.fail_item(id, &failed, "the audio could not be prepared")
                         }
                     }
                 ),
@@ -974,6 +1121,7 @@ impl MagpieApplication {
         let audio_after = audio.to_path_buf();
 
         self.set_transcript_state(id, TranscriptState::Running);
+        self.begin_pass(id);
 
         let handle = process::run(
             whisper,
@@ -986,7 +1134,9 @@ impl MagpieApplication {
                     // fed through the same parser rather than guessing which.
                     if let Some(fraction) = transcript::parse_progress(line) {
                         let mut progress = app.imp().progress.borrow_mut();
-                        progress.entry(id).or_default().transcript_fraction = Some(fraction);
+                        let entry = progress.entry(id).or_default();
+                        entry.transcript_fraction = Some(fraction);
+                        entry.advance(std::time::Instant::now(), fraction);
                         drop(progress);
                         app.touch();
                     }
@@ -1019,26 +1169,24 @@ impl MagpieApplication {
                     if let Some(scratch) = &scratch_path {
                         let _ = std::fs::remove_file(scratch);
                     }
-                    app.imp().progress.borrow_mut().remove(&id);
 
                     match outcome {
                         process::Outcome::Success if output.exists() => {
-                            app.set_transcript_state(id, TranscriptState::Done(output.clone()));
-                            app.persist();
+                            app.transcript_written(id, &media_after, &output)
                         }
                         // Exited zero without writing the file: whisper does
                         // this when the audio is silent or the model failed to
                         // load, and reporting success would leave a row claiming
                         // a transcript that is not there.
                         process::Outcome::Success => {
-                            app.fail_transcript(id, "whisper wrote no transcript")
+                            app.fail_item(id, &media_after, "whisper wrote no transcript")
                         }
-                        process::Outcome::Cancelled => {
-                            app.set_transcript_state(id, TranscriptState::None)
-                        }
-                        process::Outcome::Failed { .. } => {
-                            app.fail_transcript(id, "whisper could not transcribe this audio")
-                        }
+                        process::Outcome::Cancelled => app.stop_pass(id),
+                        process::Outcome::Failed { .. } => app.fail_item(
+                            id,
+                            &media_after,
+                            "whisper could not transcribe this audio",
+                        ),
                     }
                 }
             ),
@@ -1050,6 +1198,23 @@ impl MagpieApplication {
                 self.imp().progress.borrow_mut().entry(id).or_default();
             }
             Err(_) => self.fail_transcript(id, "whisper.cpp could not be started"),
+        }
+    }
+
+    /// Begin timing a transcript pass, once per pass rather than once per item.
+    ///
+    /// A hundred and seven items are one wait, and the figure the row shows is
+    /// how long that wait has left. Restarting the clock on each item would make
+    /// it "how long until item five", which nobody is waiting for.
+    fn begin_pass(&self, id: u64) {
+        let fresh = self
+            .imp()
+            .progress
+            .borrow()
+            .get(&id)
+            .map_or(true, |progress| progress.started.is_none());
+        if fresh {
+            self.begin_stage(id);
         }
     }
 
@@ -1071,11 +1236,17 @@ impl MagpieApplication {
     ) {
         let imp = self.imp();
         let Some(diarize_wish) = wish.diarize else {
-            self.finish_without_speakers(id, output, scratch, None);
+            self.finish_without_speakers(id, media_path, output, scratch, None);
             return;
         };
         let Some(diarizer) = imp.report.borrow().diarizer.clone().map(|found| found.path) else {
-            self.finish_without_speakers(id, output, scratch, Some("sherpa-onnx is not installed"));
+            self.finish_without_speakers(
+                id,
+                media_path,
+                output,
+                scratch,
+                Some("sherpa-onnx is not installed"),
+            );
             return;
         };
 
@@ -1083,6 +1254,7 @@ impl MagpieApplication {
         if !toolbox::diarize_models_on_disk(&models_dir) {
             self.finish_without_speakers(
                 id,
+                media_path,
                 output,
                 scratch,
                 Some("the speaker models have not been downloaded — see Preferences"),
@@ -1104,6 +1276,7 @@ impl MagpieApplication {
         );
 
         self.set_transcript_state(id, TranscriptState::Identifying);
+        self.begin_pass(id);
         imp.progress
             .borrow_mut()
             .entry(id)
@@ -1120,6 +1293,12 @@ impl MagpieApplication {
         // which runs only when the process never started.
         let failed_to_start = output.to_path_buf();
         let output = output.to_path_buf();
+        // Which item of the collection this is, for recording the result
+        // against — the pass has more files after this one. Two copies, as with
+        // the output above: one for the handler, one for the path taken when the
+        // process never starts.
+        let media_after = media_path.to_path_buf();
+        let media_unstarted = media_path.to_path_buf();
 
         let handle = process::run(
             &diarizer,
@@ -1134,7 +1313,9 @@ impl MagpieApplication {
                     }
                     if let Some(fraction) = diarize::parse_progress(line) {
                         let mut progress = app.imp().progress.borrow_mut();
-                        progress.entry(id).or_default().transcript_fraction = Some(fraction);
+                        let entry = progress.entry(id).or_default();
+                        entry.transcript_fraction = Some(fraction);
+                        entry.advance(std::time::Instant::now(), fraction);
                         drop(progress);
                         app.touch();
                     }
@@ -1148,7 +1329,6 @@ impl MagpieApplication {
                         let _ = std::fs::remove_file(scratch);
                     }
                     app.imp().handles.borrow_mut().remove(&id);
-                    app.imp().progress.borrow_mut().remove(&id);
 
                     let turns = turns.borrow();
                     match outcome {
@@ -1167,14 +1347,11 @@ impl MagpieApplication {
                                     if let Some(job) = app.imp().queue.borrow_mut().get_mut(id) {
                                         job.speakers = Some(summary);
                                     }
-                                    app.set_transcript_state(
-                                        id,
-                                        TranscriptState::Done(output.clone()),
-                                    );
-                                    app.persist();
+                                    app.transcript_written(id, &media_after, &output);
                                 }
                                 None => app.finish_without_speakers(
                                     id,
+                                    &media_after,
                                     &output,
                                     None,
                                     Some("the transcript could not be marked up"),
@@ -1185,15 +1362,15 @@ impl MagpieApplication {
                         // segmentation model heard no speech in.
                         process::Outcome::Success => app.finish_without_speakers(
                             id,
+                            &media_after,
                             &output,
                             None,
                             Some("no speech was found to attribute"),
                         ),
-                        process::Outcome::Cancelled => {
-                            app.set_transcript_state(id, TranscriptState::None)
-                        }
+                        process::Outcome::Cancelled => app.stop_pass(id),
                         process::Outcome::Failed { .. } => app.finish_without_speakers(
                             id,
+                            &media_after,
                             &output,
                             None,
                             Some("the speakers could not be identified"),
@@ -1209,6 +1386,7 @@ impl MagpieApplication {
             }
             Err(_) => self.finish_without_speakers(
                 id,
+                &media_unstarted,
                 &failed_to_start,
                 None,
                 Some("sherpa-onnx could not be started"),
@@ -1248,6 +1426,7 @@ impl MagpieApplication {
     fn finish_without_speakers(
         &self,
         id: u64,
+        media: &Path,
         output: &Path,
         scratch: Option<PathBuf>,
         reason: Option<&str>,
@@ -1255,12 +1434,134 @@ impl MagpieApplication {
         if let Some(scratch) = &scratch {
             let _ = std::fs::remove_file(scratch);
         }
-        self.imp().progress.borrow_mut().remove(&id);
-        self.set_transcript_state(id, TranscriptState::Done(output.to_path_buf()));
         if let Some(reason) = reason {
             self.toast(&format!("Transcript ready, but no speakers — {reason}"));
         }
+        self.transcript_written(id, media, output);
+    }
+
+    /// One item's transcript is written. Record it, then take the next.
+    fn transcript_written(&self, id: u64, media: &Path, transcript: &Path) {
+        if let Some(job) = self.imp().queue.borrow_mut().get_mut(id) {
+            if job.transcript_for(transcript).is_none() {
+                job.transcripts.push(transcript.to_path_buf());
+            }
+            // An item that failed last time and has just succeeded is no longer
+            // a failure.
+            job.transcript_failures.retain(|path| path != media);
+        }
+        self.advance_pass(id, None);
+    }
+
+    /// whisper could not do this one. Mark the item and carry on.
+    ///
+    /// The item is recorded rather than merely reported, for two reasons: the
+    /// pass has to move past it — the first item being four seconds of silence
+    /// must not cost the other hundred and six — and the row has to be able to
+    /// say afterwards that three of them have no words.
+    fn fail_item(&self, id: u64, media: &Path, reason: &str) {
+        if let Some(job) = self.imp().queue.borrow_mut().get_mut(id) {
+            if !job.transcript_failures.iter().any(|path| path == media) {
+                job.transcript_failures.push(media.to_path_buf());
+            }
+        }
+        self.advance_pass(id, Some(reason.to_string()));
+    }
+
+    /// Move on to the next file, or bring the pass to an end.
+    fn advance_pass(&self, id: u64, reason: Option<String>) {
+        // The item just finished left its percentage behind; the next one would
+        // otherwise start at whatever the last one ended on.
+        if let Some(entry) = self.imp().progress.borrow_mut().get_mut(&id) {
+            entry.transcript_fraction = None;
+        }
+
+        let more = self
+            .imp()
+            .queue
+            .borrow()
+            .get(id)
+            .is_some_and(|job| job.next_untranscribed().is_some());
+        if more {
+            self.persist();
+            self.refresh();
+            self.start_transcript(id);
+            return;
+        }
+
+        self.imp().progress.borrow_mut().remove(&id);
+
+        let Some(job) = self.imp().queue.borrow().get(id).cloned() else {
+            return;
+        };
+        match job.transcripts.last() {
+            // Some words were made, even if not for every item. The row's own
+            // tally says how many, which is more use than a state that reads
+            // "failed" over a hundred and four finished transcripts.
+            Some(last) => {
+                self.set_transcript_state(id, TranscriptState::Done(last.clone()));
+                if job.collection.is_some() {
+                    self.toast(&format!("{} · {}", job.title, job.transcript_tally()));
+                }
+            }
+            None => {
+                let reason = reason.unwrap_or_else(|| "no transcript could be made".to_string());
+                self.set_transcript_state(id, TranscriptState::Failed(reason.clone()));
+                self.toast(&format!("No transcript — {reason}"));
+            }
+        }
         self.persist();
+    }
+
+    /// A pass that was stopped, by the user or by the process going away.
+    ///
+    /// The wish is kept: the row goes on offering Transcribe, and pressing it
+    /// picks up at the first item that has no words rather than starting the
+    /// hundred again.
+    fn stop_pass(&self, id: u64) {
+        self.imp().progress.borrow_mut().remove(&id);
+        self.set_transcript_state(id, TranscriptState::None);
+        self.persist();
+    }
+
+    /// Transcribe what has been downloaded and has no words yet.
+    ///
+    /// The catch-up: a playlist fetched before transcripts were asked for, or a
+    /// video downloaded last week. Failures are cleared first, because pressing
+    /// the button is someone saying to try again.
+    fn transcribe_now(&self, id: u64) {
+        if !self.imp().report.borrow().has_whisper() {
+            self.toast("Transcripts need whisper.cpp — see Preferences");
+            return;
+        }
+
+        let wish = self.imp().settings.borrow().transcript.clone();
+        {
+            let mut queue = self.imp().queue.borrow_mut();
+            let Some(job) = queue.get_mut(id) else { return };
+            if !job.can_transcribe() {
+                return;
+            }
+            job.transcript_failures.clear();
+            // Whatever the preferences say now, rather than what they said when
+            // the download was queued: this is a fresh request.
+            job.transcribe = Some(wish);
+            job.transcript_state = TranscriptState::Waiting;
+        }
+        self.refresh();
+        self.persist();
+        self.start_transcript(id);
+    }
+
+    /// Stop a transcript pass where it stands.
+    fn stop_transcript(&self, id: u64) {
+        let handle = self.imp().handles.borrow().get(&id).cloned();
+        match handle {
+            // The process's own exit handler settles the state, so there is one
+            // path rather than two that have to agree.
+            Some(handle) => handle.cancel(),
+            None => self.stop_pass(id),
+        }
     }
 
     fn set_transcript_state(&self, id: u64, state: TranscriptState) {
@@ -1702,7 +2003,86 @@ impl MagpieApplication {
             "remove" => self.remove(id),
             "open" => self.open_output(id),
             "transcript" => self.open_transcript(id),
+            "transcribe" => self.transcribe_now(id),
+            "stop-transcript" => self.stop_transcript(id),
             "details" => self.show_details(id),
+            "expand" => {
+                // The row builds its item lines when it is bound, so opening one
+                // needs a redraw to fill it in. Synchronous, inside the click: a
+                // finished collection is not otherwise redrawn at all, and
+                // waiting for the tick would show an empty list first.
+                self.refresh();
+                self.list_collection(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Find out what a playlist contains, for a row that has just been opened.
+    ///
+    /// Only for a job that has no items to show: one added by an older Magpie,
+    /// or added without the dialog before yt-dlp answered. Until this returns
+    /// the row lists numbered items, which is what it can honestly say.
+    fn list_collection(&self, id: u64) {
+        let imp = self.imp();
+        let Some((url, wanted)) = imp.queue.borrow().get(id).and_then(|job| {
+            let collection = job.collection.as_ref()?;
+            job.items
+                .is_empty()
+                .then(|| (job.url.clone(), collection.items.clone()))
+        }) else {
+            return;
+        };
+        let Some(ytdlp) = self.ytdlp() else { return };
+        if !imp.listing.borrow_mut().insert(id) {
+            return;
+        }
+
+        let args = request::info_argv(&url, true);
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            async move {
+                let capture = process::capture(&ytdlp, &args).await;
+                app.imp().listing.borrow_mut().remove(&id);
+
+                let Ok(capture) = capture else { return };
+                let Ok(Info::Collection(playlist)) = media::parse(&capture.stdout) else {
+                    return;
+                };
+                let items = collection::items(&playlist.entries, &wanted);
+                if let Some(job) = app.imp().queue.borrow_mut().get_mut(id) {
+                    job.items = items;
+                }
+                app.refresh();
+                app.persist();
+            }
+        ));
+    }
+
+    /// Open one item of a collection: the file itself, or its transcript.
+    fn item_action(&self, id: u64, index: u64, action: &str) {
+        let progress = self.imp().progress.borrow().get(&id).cloned();
+        let line = self.imp().queue.borrow().get(id).and_then(|job| {
+            collection::lines(job, progress.as_ref())
+                .into_iter()
+                .find(|line| line.index == index as usize)
+        });
+        let Some(line) = line else { return };
+
+        match action {
+            // The containing folder with the file selected, as the row's own
+            // Show in Files does.
+            "open" => {
+                if let Some(path) = line.path() {
+                    self.open_path(path, true);
+                }
+            }
+            "transcript" => {
+                if let Some(path) = line.transcript() {
+                    self.open_path(path, false);
+                }
+            }
             _ => {}
         }
     }
@@ -1990,6 +2370,20 @@ fn ticker(command_line: &gio::ApplicationCommandLine, what: &'static str) -> imp
         if step > last.get() {
             last.set(step);
             note(&command_line, &format!("{what} — {}%", step * 10));
+        }
+    }
+}
+
+/// Add what this run produced to what the job already had.
+///
+/// Added rather than replaced because a playlist interrupted halfway through
+/// starts a second yt-dlp with a fresh sink, and the fifty-seven files from the
+/// first run are still on disk. Replacing would report them as still to come.
+/// Starting over is `retry`, which empties the list on purpose.
+fn merge_outputs(outputs: &mut Vec<PathBuf>, produced: Vec<PathBuf>) {
+    for path in produced {
+        if !outputs.contains(&path) {
+            outputs.push(path);
         }
     }
 }

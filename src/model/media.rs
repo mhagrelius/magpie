@@ -302,6 +302,29 @@ pub fn format_duration(seconds: u64) -> String {
     }
 }
 
+/// A running total in round words: `3 hours 20 minutes`.
+///
+/// [`format_duration`] is a clock reading, which is right beside one video and
+/// wrong for the sum of a hundred: `58:12:04` is a number to decode, where
+/// "58 hours" is the answer to "am I really downloading all of this?".
+pub fn format_total(seconds: u64) -> String {
+    let (hours, minutes) = (seconds / 3600, (seconds % 3600) / 60);
+    let plural = |count: u64, unit: &str| match count {
+        1 => format!("1 {unit}"),
+        count => format!("{count} {unit}s"),
+    };
+
+    match (hours, minutes) {
+        (0, 0) => plural(seconds, "second"),
+        (0, minutes) => plural(minutes, "minute"),
+        // Minutes stop mattering once there are hours of it, and "14 hours
+        // 3 minutes" is longer than the fact it carries.
+        (hours, _) if hours >= 10 => plural(hours, "hour"),
+        (hours, 0) => plural(hours, "hour"),
+        (hours, minutes) => format!("{} {}", plural(hours, "hour"), plural(minutes, "minute")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +459,16 @@ mod tests {
         assert_eq!(format_duration(272), "4:32");
         assert_eq!(format_duration(3731), "1:02:11");
         assert_eq!(format_duration(0), "0:00");
+    }
+
+    #[test]
+    fn a_total_reads_as_words_rather_than_a_clock() {
+        // What a playlist adds up to, which is the figure someone weighs before
+        // downloading a hundred and seven of anything.
+        assert_eq!(format_total(272), "4 minutes");
+        assert_eq!(format_total(3731), "1 hour 2 minutes");
+        assert_eq!(format_total(209_520), "58 hours");
+        assert_eq!(format_total(7200), "2 hours");
+        assert_eq!(format_total(30), "30 seconds");
     }
 }
