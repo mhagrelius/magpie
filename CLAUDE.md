@@ -11,6 +11,7 @@ Crate is a lib + bin so integration tests and `examples/` can drive the real app
 ## Commands
 
 - `./test.sh` — fmt check, clippy with `-D warnings`, then `cargo test --all-targets`. Add `--headless` to run under Xvfb + a private D-Bus session. This is the gate; run it, not bare `cargo test`.
+- **Never run `dbus-run-session` or `xvfb-run -a dbus-run-session` directly** — use `isolated-bus [--headless] -- CMD`. A private bus activates its own `xdg-document-portal`, which mounts over `/run/user/$UID/doc` and takes the login session's portal down with it when the bus exits; every flatpak on the machine then fails to launch until it is restarted. `test.sh --headless` guards against this internally, but one-off runs of a single test, or of the built binary, bypass it.
 - `./install.sh` — release build, installs under `~/.local`. `./uninstall.sh` reverses it.
 - `packaging/build-flatpak.sh` and `packaging/build-deb.sh` — distribution artifacts.
 - `cargo run --example preview -- /tmp/preview [dark]` — paints the real widget tree
